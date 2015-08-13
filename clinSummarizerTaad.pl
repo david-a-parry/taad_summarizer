@@ -26,7 +26,7 @@ GetOptions(
     \%opts,
     'i|input=s',        #vcf input
     'o|output=s',       #xlsx output
-    'm|hgmd=s',         #vcf of HGMD variations converted with hgmd_to_vcf.pl
+    'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
     't|transcripts=s',  #optional tsv list of transcript IDs in order of priority
     'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
     'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
@@ -1178,7 +1178,7 @@ Output xlsx file. Defaults to input file with .xlsx extension added.
 
 =item B<-m    --hgmd>
 
-VCF of HGMD variations converted with hgmd_to_vcf.pl
+VCF of HGMD variations converted with hgmdMartToVcf.pl
 
 =item B<-c    --clinvar>
 
