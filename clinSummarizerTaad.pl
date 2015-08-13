@@ -13,6 +13,8 @@ use File::Basename;
 use FindBin;
 use Tabix; 
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use HTTP::Tiny;
+use JSON;
 use lib "$FindBin::Bin/lib";
 use VcfReader;
 use TextToExcel;
@@ -31,13 +33,20 @@ GetOptions(
     'd|depth=i',         #optional min depth for sample call
     'a|allele_cutoff=f', #remove if allele is present in this proportion or more calls
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
+    'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
     'h|?|help',
+    'manual',
 ) or pod2usage(-exitval => 2, -message => "Syntax error.\n"); 
 
 pod2usage( -verbose => 1 ) if $opts{h};
+pod2usage( -verbose => 2 ) if $opts{manual};
 pod2usage( -exitval => 2, -message => "-i/--input is required" ) if (not $opts{i});
 pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m});
+
+#create our http client for ensembl REST queries 
+my $http = HTTP::Tiny->new();
+my $server = $opts{r} ? $opts{r} : 'http://grch37.rest.ensembl.org';
 
 #open VCF, get samples and get VEP annotations
 
@@ -321,7 +330,24 @@ sub writeToSheet{
     push @row, VcfReader::getVariantField($l, 'QUAL');
     push @row, VcfReader::getVariantField($l, 'FILTER');
     #deal with VEP annotations
-    my @get_vep =  qw /Symbol Consequence Allele feature canonical hgvsc hgvsp polyphen sift GERP++_RS/ ; 
+    my @get_vep =  
+      qw /
+            Symbol
+            Consequence
+            Allele
+            feature
+            canonical
+            hgvsc
+            hgvsp
+            polyphen
+            sift
+            GERP++_RS
+            DOMAINS
+            Amino_acids
+            protein_position
+            ensp
+      /;
+
     my @vep_csq = VcfReader::getVepFields
     (
         line       => $l,
@@ -355,6 +381,7 @@ sub writeToSheet{
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     if (@$matches or 
         $most_damaging_csq eq 'missense_variant' or  
+        $most_damaging_csq eq 'protein_altering_variant' or  
         $most_damaging_csq =~  /^inframe_(inser|dele)tion$/
     ){
         push @vep_fields, qw /polyphen sift/;
@@ -385,8 +412,12 @@ sub writeToSheet{
     }elsif (exists $lofs{$most_damaging_csq}){
         $s_name = "LOF";
     }elsif ($most_damaging_csq eq 'missense_variant'){
-        #check if damaging or benign... should we use Polyphen/SIFT as well/instead?
-        if ($allele_cadd  >= 10 and 
+        #check if in collagen domain
+        if (exists $csq_to_report->{glyxy}){
+            $s_name = "CollagenGlyXY";
+            push @row, $csq_to_report->{domain_coords};
+        #check if damaging or benign...
+        }elsif ($allele_cadd  >= 10 and 
             $csq_to_report->{polyphen} =~ /damaging/i and 
             $csq_to_report->{sift} =~ /deleterious/i
         ){
@@ -394,8 +425,12 @@ sub writeToSheet{
         }else{
             $s_name = "BenignMissense";
         }
-    }elsif($most_damaging_csq =~  /^inframe_(inser|dele)tion$/){
-        if ($allele_cadd >= 10){
+    }elsif( $most_damaging_csq =~  /^inframe_(inser|dele)tion$/ or
+            $most_damaging_csq eq 'protein_altering_variant'){
+        #check if in collagen domain
+        if (exists $csq_to_report->{glyxy}){
+            $s_name = "CollagenGlyXY";
+        }elsif ($allele_cadd >= 10){
             $s_name = "DamagingMissense";
         }else{
             $s_name = "BenignMissense";
@@ -643,6 +678,8 @@ sub setupOutput{
 
     $sheets{LOF} = addSheet("LOF", $headers{LOF});
     
+    $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{glyxy});
+    
     $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{missense});
 
     $sheets{BenignMissense} = addSheet("BenignMissense", $headers{missense});
@@ -744,6 +781,35 @@ sub getHeaders{
             GQ
      /);
 
+    @{$h{glyxy}} =  ( 
+        qw / 
+            index
+            ClinVarSig
+            ClinVarTrait
+            Chrom
+            Pos
+            Ref
+            Alt
+            Qual
+            Filter
+            Symbol
+            Feature 
+            Consequence 
+            HGVSc 
+            HGVSp 
+            GERP
+            Polyphen
+            SIFT
+            CADD
+            DomainCoordinates
+            Sample
+            GT
+            AD
+            AB
+            GQ
+     /);
+
+
 
 
     @{$h{missense}} =  ( 
@@ -778,6 +844,7 @@ sub getHeaders{
             Sample
             HGMD_DM
             ClinVarPathogenic
+            CollagenGlyXY
             HGMD_other
             LOF
             DamagingMissense
@@ -806,14 +873,174 @@ sub addSheet{
 sub rankTranscriptsAndConsequences{
     my $csq_array = shift;#ref to array of VEP consequences 
     @$csq_array = rankConsequences(@$csq_array); 
-    my $most_damaging = $csq_array-> [0] -> {consequence} ;
+    my $most_damaging = $csq_array->[0]->{consequence} ;
     @$csq_array = rankTranscripts(@$csq_array); 
-    return first { $_ -> {consequence} eq $most_damaging } @$csq_array;
+    if ($most_damaging eq 'missense_variant' or 
+        $most_damaging eq 'protein_altering_variant' or  
+        $most_damaging =~ /^inframe_(inser|dele)tion$/
+    ){
+        #check if is mutation of glycine in collagen triple helix and return
+        if (my $glyxy_csq = checkCollagenDomain($csq_array)){
+            return $glyxy_csq;
+        }
+    }
+    return first { $_->{consequence} eq $most_damaging } @$csq_array;
 }
+###########################################################
+sub checkCollagenDomain{
+# only applicable to missense and inframe indels
+# returns first VEP consequence with a missense altering a Gly 
+# in a collagen triple helix or an inframe indel that is alters
+# a number of amino acids not divisible by 3
+    my $csq_array = shift;#ref to array of VEP consequences 
+    foreach my $c (@$csq_array){
+        next if not $c->{domains};
+        my @domains = split ("&", $c->{domains}); #domains variant overlaps
+        if (grep { /Pfam_domain:PF01391/i } @domains){
+            my @aa = split ("/", $c->{amino_acids} ) ;
+            s/-// for @aa; #turn deleted AAs to empty strings
+            print STDERR "[INFO] Found variant in collagen triple helix\n";
+            print STDERR "[INFO] Checking domain sequence using Ensembl REST...\n";
+    #get coordinates of domains to find Gly-X-Y pattern using ensembl REST API
+            #my $seq_hash  = ensRestQuery("$server/sequence/id/$c->{ensp}?"); 
+            my $rest_url = "$server/overlap/translation/$c->{ensp}?";
+            my $pfam_ar = ensRestQuery($rest_url);
+            if (ref $pfam_ar ne 'ARRAY'){
+                die "Required array reference from Ensembl REST query: $rest_url\n" 
+            }
+            my $dom_hash = findOverlappingDomain($pfam_ar, "PF01391", $c);
+           # $rest_url = "$server/sequence/id/$c->{ensp}?";
+           # my $seq_hash = ensRestQuery($rest_url);
+           # my $domain_seq = substr(
+           #                     $seq_hash->{seq}, 
+           #                     $dom_hash->{start} -1,  
+           #                     $dom_hash->{end} - $dom_hash->{start} + 1, 
+           # ); 
+           # print "DEBUG: domain seq:\n\n$domain_seq\n";
+            if (length($aa[0]) == length($aa[1])){
+                #check whether an essential glycine has been altered
+                if (essentialGlyAltered(\@aa, $c, $dom_hash)){
+                    $c->{glyxy} = 1;
+                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    return $c;
+                }
+            }else{
+                my ($p_start, $p_end) = split("-", $c->{protein_position}); 
+                my ($ref, $alt);
+                ($ref, $alt, $p_start) = simplifyIndel($aa[0], $aa[1], $p_start);
+                $p_end = $p_start + length($ref) - 1;
+                $p_end = $p_end >= $p_start ? $p_end : $p_start;#fix in case length of $ref is 0
+                my $diff = length($aa[0]) - length($aa[1]); 
+                if ($diff > 0){#deletion
+                    #check which portion of an indel lies within domain in case only partial overlap
+                    my $dp_start = $p_start >= $dom_hash->{start} ? $p_start : $dom_hash->{start};
+                    my $dp_end   = $p_end   <= $dom_hash->{end}   ? $p_end   : $dom_hash->{end};
+                    if ($dp_start != $p_start){
+                        my $trim = $dp_start - $p_start;
+                        substr($aa[0], 0, $trim, ""); #remove beginning portion that does not lie in domain
+                        substr($aa[1], 0, $trim, ""); #remove beginning portion that does not lie in domain
+                    }
+                    if ($dp_end != $p_end){
+                        my $trim = $dp_end - $p_end;
+                        $aa[0] = substr($aa[0], 0, $trim ); #remove end portion that does not lie in domain
+                        $aa[1] = substr($aa[1], 0, $trim ); #remove end portion that does not lie in domain
+                    }
+                    $diff = length($aa[0]) - length($aa[1]); 
+                }
+                #check if deletion is divisible by 3 
+                #if not divisible by 3 then triple helix broken
+                if ($diff % 3){
+                    $c->{glyxy} = 1;
+                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    return $c;
+                }
+                # if divisible by 3 check if a pos that should be a 
+                # glycine has been altered
+                if (essentialGlyAltered(\@aa, $c, $dom_hash)){
+                    $c->{glyxy} = 1;
+                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    return $c;
+                }
+            }
+        }
+    }
+}
+
+###########################################################
+sub essentialGlyAltered{
+    #return 1 if Gly at pos 0, 3, 6, etc. of domain altered
+    my ($aa, $c, $dom_hash) = @_;
+    # ref to amino acid array (ref and alt), VEP csq hash ref 
+    # and domain details hash ref
+    my @gly_idxs = grep { substr($aa->[0], $_, 1) eq "G" } 0..(length($aa->[0]));
+    foreach my $i (@gly_idxs){
+        my $pos = $i + $c->{protein_position};#actual protein pos of this Gly
+        next if $pos < $dom_hash->{start};
+        last if $pos > $dom_hash->{end};
+        my $dist = $pos - $dom_hash->{start};#distance of Gly from domain start
+        next if $dist % 3; #not an essential Gly if not at pos 0 of 3 aa repeat
+        if (substr($aa->[1], $i, 1) ne 'G'){ # Essential Gly altered
+            return 1;
+        }
+    }
+    return 0;
+}
+###########################################################
+sub simplifyIndel{
+    my ($ref, $alt, $p_start) = @_;
+    while (length($ref) > 1 and length($alt) > 1){
+        while ( (substr($ref, -1, 1)) eq (substr($alt, -1, 1)) 
+                and (length($ref) > 0) and (length($alt) > 0)
+        ){
+            substr($ref, -1, 1, "");
+            substr($alt, -1, 1, "");
+        }
+        while ( (substr($ref, 0, 1)) eq (substr($alt, 0, 1)) 
+                and (length($ref) > 0) and (length($alt) > 0)
+        ){
+            substr($ref, 0, 1, "");
+            substr($alt, 0, 1, "");
+            $p_start++;
+        }
+    }
+    return ($ref, $alt, $p_start);
+}
+###########################################################
+sub findOverlappingDomain{
+    my ($pfam_ar, $id, $csq) = @_;
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start; 
+    foreach my $hash (@$pfam_ar){
+        next if $hash->{id} ne $id;
+        next if $hash->{seq_region_name} ne $csq->{ensp};
+        if ($hash->{start} <= $p_start and $hash->{end} >= $p_start){
+            #variant lies within this domain
+            return $hash;
+        }elsif ($hash->{start} <= $p_end and $hash->{end} >= $p_end){
+            #variant lies within this domain
+            return $hash;
+        }
+    }
+    die "No overlap found with $id domain for $csq->{hgvsc}/$csq->{hgvsp} in REST database\n";
+}
+###########################################################
+sub ensRestQuery{
+    my $url = shift;
+    my $response = $http->get($url, {
+          headers => { 'Content-type' => 'application/json' }
+    });
+    die "Ensembl REST query ('$url') failed!\n" unless $response->{success};
+    if(length $response->{content}) {
+      return decode_json($response->{content});
+    }
+    die "No content for Ensembl REST query ('$url')!\n";
+}
+        
+    
 ###########################################################
 sub rankTranscripts{
     my @vars = @_;#array of hashes of VEP consequences
-    return sort { getTranscriptsRanks( uc($a -> {feature}) ) <=> getTranscriptsRanks( uc($b -> {feature}) ) } @vars;
+    return sort { getTranscriptsRanks( uc($a->{feature}) ) <=> getTranscriptsRanks( uc($b->{feature}) ) } @vars;
 }
 ###########################################################
 sub getTranscriptsRanks{
@@ -923,4 +1150,92 @@ sub getClnSigCodes{
     );
 }
 
+#################################################
 
+=head1 NAME
+
+clinSummarizerTaad.pl - assess known/potentially pathogenic mutations for TAAD
+
+=head1 SYNOPSIS
+
+        clinSummarizerTaad.pl -i [vcf file] -m [HGMD mart converted vcf file] [options]
+        clinSummarizerTaad.pl -h (display help message)
+        clinSummarizerTaad.pl --manual (display manual page)
+
+=cut
+
+=head1 ARGUMENTS
+
+=over 8
+
+=item B<-i    --input>
+
+Input VCF file (prefiltered on public databases for allele frequency).
+
+=item B<-o    --output>
+
+Output xlsx file. Defaults to input file with .xlsx extension added.
+
+=item B<-m    --hgmd>
+
+VCF of HGMD variations converted with hgmd_to_vcf.pl
+
+=item B<-c    --clinvar>
+
+Optional ClinVar VCF to add ClinVar CLINSIG annotations
+
+=item B<-t    --transcripts>
+
+Optional tsv list of transcript IDs in order of priority
+
+=item B<-b    --allele_balance>
+
+Min and optional max alt allele ratio per sample call
+
+=item B<-d    --depth>
+
+Optional min depth for sample call
+
+=item B<-a    --allele_cutoff>
+
+Remove if allele is present in this proportion or more calls
+
+=item B<-f    --filter_output>
+
+Optional output file for calls filtered on allele_cutoff
+
+=item B<-r    --rest_server>
+
+URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
+
+=item B<-g    --gq>
+
+Min GQ quality for calls
+
+=item B<-h    --help>
+
+Display help message.
+
+=item B<--manual>
+
+Show manual page.
+
+=back 
+
+=cut
+
+=head1 DESCRIPTION
+
+Creates an xlsx spreadsheet with worksheets for TAAD mutations based on categorisations such as known HGMD mutations, ClinVar pathogenic/likely pathogenic mutations, loss of function mutations, mutations of Glycines in Collagen triple helices etc.
+
+=head1 AUTHOR
+
+David A. Parry
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright 2015  David A. Parry
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+=cut
