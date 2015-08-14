@@ -327,6 +327,7 @@ sub writeToSheet{
     foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
         push @row, $var->{$f};
     }
+    push @row, VcfReader::getVariantField($l, 'ID');
     push @row, VcfReader::getVariantField($l, 'QUAL');
     push @row, VcfReader::getVariantField($l, 'FILTER');
     #deal with VEP annotations
@@ -386,13 +387,10 @@ sub writeToSheet{
     ){
         push @vep_fields, qw /polyphen sift/;
     }
-    
+    push @vep_fields, 'domains';
     foreach my $f (@vep_fields){
         push @row, $csq_to_report->{$f};
     }
-    my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
-    my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
-    push @row, $allele_cadd;
     #choose sheet to write to
     my $s_name;
     my %lofs = map {$_ => undef} qw /
@@ -405,6 +403,8 @@ sub writeToSheet{
         start_lost
         transcript_amplification
     /;
+    my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
+    my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
     if (@$matches){
         $s_name = "HGMD";
     }elsif($cvarPathognic){
@@ -440,6 +440,8 @@ sub writeToSheet{
     }
     $variant_counts{$s_name}++;
     unshift @row, $variant_counts{$s_name};
+    
+    push @row, $allele_cadd;
     
     #add sample info to new array of array refs to be written 
     # in split cells alongside global variant fields
@@ -711,6 +713,7 @@ sub getHeaders{
             Pos
             Ref
             Alt
+            ID
             Qual
             Filter
             Symbol
@@ -721,6 +724,7 @@ sub getHeaders{
             GERP
             Polyphen
             SIFT
+            Domains
             CADD
             Sample
             GT
@@ -737,6 +741,7 @@ sub getHeaders{
             Pos
             Ref
             Alt
+            ID
             Qual
             Filter
             Symbol
@@ -745,6 +750,7 @@ sub getHeaders{
             HGVSc 
             HGVSp 
             GERP
+            Domains
             CADD
             Sample
             GT
@@ -763,6 +769,7 @@ sub getHeaders{
             Pos
             Ref
             Alt
+            ID
             Qual
             Filter
             Symbol
@@ -773,6 +780,7 @@ sub getHeaders{
             GERP
             Polyphen
             SIFT
+            Domains
             CADD
             Sample
             GT
@@ -790,6 +798,7 @@ sub getHeaders{
             Pos
             Ref
             Alt
+            ID
             Qual
             Filter
             Symbol
@@ -800,8 +809,9 @@ sub getHeaders{
             GERP
             Polyphen
             SIFT
-            CADD
+            Domains
             DomainCoordinates
+            CADD
             Sample
             GT
             AD
@@ -821,6 +831,7 @@ sub getHeaders{
             Pos
             Ref
             Alt
+            ID
             Qual
             Filter
             Symbol
@@ -831,7 +842,8 @@ sub getHeaders{
             GERP
             Polyphen
             SIFT
-            CADD
+            Domains
+            CADD    
             Sample
             GT
             AD
@@ -909,17 +921,30 @@ sub checkCollagenDomain{
                 die "Required array reference from Ensembl REST query: $rest_url\n" 
             }
             my $dom_hash = findOverlappingDomain($pfam_ar, "PF01391", $c);
-           # $rest_url = "$server/sequence/id/$c->{ensp}?";
-           # my $seq_hash = ensRestQuery($rest_url);
-           # my $domain_seq = substr(
-           #                     $seq_hash->{seq}, 
-           #                     $dom_hash->{start} -1,  
-           #                     $dom_hash->{end} - $dom_hash->{start} + 1, 
-           # ); 
-           # print "DEBUG: domain seq:\n\n$domain_seq\n";
+            
+            # CHECK SEQ TO MAKE FIND 'FRAME' of GLY-X-Y repeat 
+            $rest_url = "$server/sequence/id/$c->{ensp}?";
+            my $seq_hash = ensRestQuery($rest_url);
+            die "No sequence returned from REST query: $rest_url\n" if not $seq_hash->{seq};
+            my $domain_seq = substr(
+                                $seq_hash->{seq}, 
+                                $dom_hash->{start} -1,  
+                                $dom_hash->{end} - $dom_hash->{start} + 1, 
+            ); 
+            #find the first repeat of 5 or more Gly-X-Ys 
+            # -- TO DO - more sophisticated HMM perhaps?
+            my $gxy_frame;
+            if ($domain_seq =~ /(G[A-Z]{2}){5,}/){
+                $gxy_frame = $-[0] % 3;
+            }else{
+                die "Could not find Gly-X-Y repeat in PF01391 domain seq:\n$domain_seq\n\n";
+            }
+            # print "DEBUG: domain PF01391: $dom_hash->{start}-$dom_hash->{end}:\n$domain_seq\n";
+            # print "DEBUG: frame: $gxy_frame\n";
+
             if (length($aa[0]) == length($aa[1])){
                 #check whether an essential glycine has been altered
-                if (essentialGlyAltered(\@aa, $c, $dom_hash)){
+                if (essentialGlyAltered(\@aa, $c, $dom_hash->{start} + $gxy_frame, $dom_hash->{end})){
                     $c->{glyxy} = 1;
                     $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
                     return $c;
@@ -956,7 +981,7 @@ sub checkCollagenDomain{
                 }
                 # if divisible by 3 check if a pos that should be a 
                 # glycine has been altered
-                if (essentialGlyAltered(\@aa, $c, $dom_hash)){
+                if (essentialGlyAltered(\@aa, $c, $dom_hash->{start} + $gxy_frame, $dom_hash->{end})){
                     $c->{glyxy} = 1;
                     $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
                     return $c;
@@ -969,22 +994,34 @@ sub checkCollagenDomain{
 ###########################################################
 sub essentialGlyAltered{
     #return 1 if Gly at pos 0, 3, 6, etc. of domain altered
-    my ($aa, $c, $dom_hash) = @_;
+    my ($aa, $c, $dom_start, $dom_end) = @_;
     # ref to amino acid array (ref and alt), VEP csq hash ref 
     # and domain details hash ref
     my @gly_idxs = grep { substr($aa->[0], $_, 1) eq "G" } 0..(length($aa->[0]));
     foreach my $i (@gly_idxs){
         my $pos = $i + $c->{protein_position};#actual protein pos of this Gly
-        next if $pos < $dom_hash->{start};
-        last if $pos > $dom_hash->{end};
-        my $dist = $pos - $dom_hash->{start};#distance of Gly from domain start
+        next if $pos < $dom_start;
+        last if $pos > $dom_end;
+        my $dist = $pos - $dom_start;#distance of Gly from domain start
         next if $dist % 3; #not an essential Gly if not at pos 0 of 3 aa repeat
         if (substr($aa->[1], $i, 1) ne 'G'){ # Essential Gly altered
             return 1;
         }
     }
+    #if insertion, check we have Glys in the right positions
+    if (length($aa->[0]) < length($aa->[1])){
+        my $frame = ($c->{protein_position} - $dom_start) % 3 ;
+        for (my $i = 0; $i < length($aa->[1]); $i += 3){
+            next if $i < length($aa->[0]); #only check the remaining portion of seq not in the Ref AAs
+            my $res = substr($aa->[1], $i + $frame, 1);
+            if ($res ne 'G'){
+                return 1;
+            }
+        }
+    }
     return 0;
 }
+
 ###########################################################
 sub simplifyIndel{
     my ($ref, $alt, $p_start) = @_;
