@@ -1261,55 +1261,55 @@ Output xlsx file. Defaults to input file with .xlsx extension added.
 
 =item B<-m    --hgmd>
 
-VCF of HGMD variations converted with hgmdMartToVcf.pl
+VCF of HGMD variations converted with hgmdMartToVcf.pl.
 
 =item B<-c    --clinvar>
 
-Optional ClinVar VCF to add ClinVar CLINSIG annotations
+Optional ClinVar VCF to add ClinVar CLINSIG annotations.
 
 =item B<-t    --transcripts>
 
-Optional tsv list of transcript IDs in order of priority
+Optional tsv list of transcript IDs in order of priority.
 
 =item B<-b    --allele_balance>
 
-Min and optional max alt allele ratio per sample call
+Min and optional max alt allele ratio per sample call.
 
 =item B<-d    --depth>
 
-Optional min depth for sample call
+Optional min depth for sample call.
 
 =item B<-a    --allele_cutoff>
 
-Remove if allele is present in this proportion or more calls
+Remove if allele is present in this proportion or more calls.
 
 =item B<-f    --filter_output>
 
-Optional output file for calls filtered on allele_cutoff
+Optional output file for calls filtered on allele_cutoff.
 
 =item B<-r    --rest_server>
 
-URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
+URL of REST server to use if not the default (http://grch37.rest.ensembl.org).
 
 =item B<-g    --gq>
 
-Min GQ quality for calls
+Min GQ quality for calls.
 
 =item B<-p    --progress>
 
-Display a progress bar
+Display a progress bar.
 
 =item B<-v    --verbose>
 
-Show verbose progress information
+Show verbose progress information.
 
 =item B<-h    --help>
 
-Display help message
+Display help message.
 
 =item B<--manual>
 
-Show manual page
+Show manual page.
 
 =back 
 
