@@ -5,6 +5,8 @@ use strict;
 use warnings;
 use Getopt::Long;
 use Data::Dumper;
+use Term::ProgressBar;
+use POSIX qw/strftime/;
 use Excel::Writer::XLSX;
 use Excel::Writer::XLSX::Utility;
 use List::Util qw(first sum);
@@ -19,6 +21,7 @@ use lib "$FindBin::Bin/lib";
 use VcfReader;
 use TextToExcel;
 
+my $progressbar;
 my @allele_balance = ();
 my $min_gq = 0; 
 my %opts = (b => \@allele_balance, g => $min_gq);
@@ -35,6 +38,8 @@ GetOptions(
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
     'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
+    'p|progress',        #show a progress bar?
+    'v|verbose',         #print extra progress information
     'h|?|help',
     'manual',
 ) or pod2usage(-exitval => 2, -message => "Syntax error.\n"); 
@@ -49,20 +54,22 @@ my $http = HTTP::Tiny->new();
 my $server = $opts{r} ? $opts{r} : 'http://grch37.rest.ensembl.org';
 
 #open VCF, get samples and get VEP annotations
-
+informUser("Checking input VCF\n");
 my @vhead              = VcfReader::getHeader($opts{i});
 die "VCF header not OK for $opts{i}\n" if not VcfReader::checkHeader(header => \@vhead);
 my %samples_to_columns = VcfReader::getSamples(header => \@vhead, get_columns => 1);
 my %vep_fields         = VcfReader::readVepHeader(header => \@vhead);
-my $FH                 = VcfReader::_openFileHandle($opts{i}); 
+my $total_var;
 
 #check HGMD VCF and retrieve search arguments 
 
+informUser("Checking HGMD vcf\n");
 my %search_args = getSearchArgs();
 
 # check ClinVar TSV file (https://github.com/macarthur-lab/clinvar) 
 # if supplied and retrieve search arguments 
 
+informUser("Checking ClinVar\n");
 my %clinvar_sargs = getClinVarSearchArgs();
 my %clnsig_codes = getClnSigCodes();
 
@@ -87,6 +94,7 @@ my $std_formatting;
 my $url_format;
 my $xl_obj;
 #filehandle for --allele_cutoff filtered variants
+informUser("Preparing output file\n");
 my $FILTER_OUT;
 setupOutput();
 
@@ -96,18 +104,43 @@ my %variant_counts = map { $_ => 0 } qw / HGMD LOF DamagingMissense BenignMissen
 #store variants per sample in this hash for writing sample sheet
 my %sample_vars = (); 
 
-#start reading variants
+#set up progress bar if user wants one
+my $next_update = 0;
+my $n = 0;
+if ($opts{p}){
+    informUser("Calculating file length for progress bar...\n");
+    $total_var = VcfReader::countVariants( $opts{i} );
+    informUser("$opts{i} has $total_var variants.\n");
+    $progressbar = Term::ProgressBar->new(
+        { name => "Analyzing", 
+          count => ($total_var), 
+          ETA => "linear" 
+        } 
+    );
+    $progressbar->rbrack('>');
+}
+
+#get filehandle and start reading variants
+my $FH = VcfReader::_openFileHandle($opts{i}); 
+informUser("Commencing variant analysis\n");
 while (my $l = <$FH>){
     next if $l =~ /^#/;
     assessAndWriteVariant($l);
+    $n++;
+    if ($progressbar){
+        $next_update = $progressbar->update($n) if $n >= $next_update;
+    }
 }
 close $FH;
+if ($progressbar){
+    $progressbar->update($total_var) if $total_var >= $next_update;
+}
 if ($FILTER_OUT){
     close $FILTER_OUT;
 }
-print STDERR "Done writing variant sheets - writing sample summary...\n"; 
+informUser("Done writing variant sheets - writing sample summary...\n"); 
 writeSampleSummary();
-print STDERR "Done.\n";
+informUser("Done.\n");
 if ($xl_obj){
     $xl_obj->DESTROY();
 }
@@ -911,8 +944,10 @@ sub checkCollagenDomain{
         if (grep { /Pfam_domain:PF01391/i } @domains){
             my @aa = split ("/", $c->{amino_acids} ) ;
             s/-// for @aa; #turn deleted AAs to empty strings
-            print STDERR "[INFO] Found variant in collagen triple helix\n";
-            print STDERR "[INFO] Checking domain sequence using Ensembl REST...\n";
+            if ($opts{v}){
+                informUser("Found variant in collagen triple helix\n");
+                informUser("Checking domain sequence using Ensembl REST...\n");
+            }
     #get coordinates of domains to find Gly-X-Y pattern using ensembl REST API
             #my $seq_hash  = ensRestQuery("$server/sequence/id/$c->{ensp}?"); 
             my $rest_url = "$server/overlap/translation/$c->{ensp}?";
@@ -939,9 +974,10 @@ sub checkCollagenDomain{
             }else{
                 die "Could not find Gly-X-Y repeat in PF01391 domain seq:\n$domain_seq\n\n";
             }
-            # print "DEBUG: domain PF01391: $dom_hash->{start}-$dom_hash->{end}:\n$domain_seq\n";
-            # print "DEBUG: frame: $gxy_frame\n";
-
+            if ($opts{v}){
+                informUser("domain PF01391: $dom_hash->{start}-$dom_hash->{end} - $domain_seq\n");
+                informUser("frame: $gxy_frame\n");
+            }
             if (length($aa[0]) == length($aa[1])){
                 #check whether an essential glycine has been altered
                 if (essentialGlyAltered(\@aa, $c, $dom_hash->{start} + $gxy_frame, $dom_hash->{end})){
@@ -972,7 +1008,7 @@ sub checkCollagenDomain{
                     }
                     $diff = length($aa[0]) - length($aa[1]); 
                 }
-                #check if deletion is divisible by 3 
+                #check if insertion/deletion is divisible by 3 
                 #if not divisible by 3 then triple helix broken
                 if ($diff % 3){
                     $c->{glyxy} = 1;
@@ -1187,6 +1223,16 @@ sub getClnSigCodes{
     );
 }
 
+#################################################
+sub informUser{
+    my $msg = shift;
+    my $time = strftime( "%H:%M:%S", localtime );
+    if ($progressbar){
+        $progressbar->message( "[INFO - $time] $msg" );
+    }else{
+        print STDERR "[INFO - $time] $msg";
+    }
+}
 #################################################
 
 =head1 NAME
