@@ -1295,13 +1295,21 @@ URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
 
 Min GQ quality for calls
 
+=item B<-p    --progress>
+
+Display a progress bar
+
+=item B<-v    --verbose>
+
+Show verbose progress information
+
 =item B<-h    --help>
 
-Display help message.
+Display help message
 
 =item B<--manual>
 
-Show manual page.
+Show manual page
 
 =back 
 
