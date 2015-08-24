@@ -1,0 +1,3 @@
+[submodule "ensembl"]
+	path = ensembl
+	url = https://github.com/Ensembl/ensembl.git
