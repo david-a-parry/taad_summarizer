@@ -516,7 +516,7 @@ sub writeToSheet{
                 next if $opts{d} > $depth;
             }
             if ($opts{g}){
-                eval "$opts{g} > $samp_gqs{$s}" or next;
+                eval "$opts{g} <= $samp_gqs{$s}" or next;
             }
             my $ab = 0;
             if ( $depth > 0){
