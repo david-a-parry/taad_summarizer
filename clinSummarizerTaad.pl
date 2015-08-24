@@ -472,8 +472,6 @@ sub writeToSheet{
     }else{
         $s_name = "Other";
     }
-    $variant_counts{$s_name}++;
-    unshift @row, $variant_counts{$s_name};
     
     push @row, $allele_cadd;
     
@@ -545,6 +543,8 @@ sub writeToSheet{
         }
     }
     if (not $opts{n} or $variant_has_valid_sample){
+        $variant_counts{$s_name}++;
+        unshift @row, $variant_counts{$s_name};
         $xl_obj->writeLine
         (
             line       => \@row, 
