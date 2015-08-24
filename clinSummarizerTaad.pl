@@ -29,6 +29,7 @@ GetOptions(
     \%opts,
     'i|input=s',        #vcf input
     'o|output=s',       #xlsx output
+    'n|no_blanks',      #no blank samples
     'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
     't|transcripts=s',  #optional tsv list of transcript IDs in order of priority
     'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
@@ -79,7 +80,7 @@ setConsequenceRanks();
 
 #open and check transcripts list
 
-my %refseq_ranks = ();
+my %transcript_ranks = ();
 setTranscriptsRanks();
 
 #setup our hash of headers
@@ -403,9 +404,9 @@ sub writeToSheet{
         #skip consequences for different alleles if variant site is multiallelic
         next if $csq->{allele} ne $alt_to_vep{ $var->{ORIGINAL_ALT} };
         #if we've provided a list of RefSeq ranks skip if this gene symbol is not listed
-        if (keys %refseq_ranks){
+        if (keys %transcript_ranks){
             my $sym = uc($csq->{symbol});
-            next if not exists $refseq_ranks{$sym};
+            next if not exists $transcript_ranks{$sym};
         }
         push @csq_to_rank , $csq;
     }
@@ -502,6 +503,7 @@ sub writeToSheet{
               minGQ => $min_gq,
         );
     
+    my $variant_has_valid_sample = 0;
     foreach my $s (
             sort {$samples_to_columns{$a} <=> $samples_to_columns{$b}} 
             keys %samples_to_columns
@@ -512,8 +514,10 @@ sub writeToSheet{
             my $depth = sum(@ads);
             if ($opts{d}){
                 next if $opts{d} > $depth;
-            }   
-            
+            }
+            if ($opts{g}){
+                eval "$opts{g} > $samp_gqs{$s}" or next;
+            }
             my $ab = 0;
             if ( $depth > 0){
                 $ab = $ads[$var->{ALT_INDEX}]/$depth;
@@ -524,6 +528,7 @@ sub writeToSheet{
                     next if $ab > $opts{b}->[1];
                 }
             }
+            $variant_has_valid_sample++;
             push @split_cells, [$s, $samp_gts{$s}, $samp_ads{$s}, $ab, $samp_gqs{$s}];
             my $var_class = $s_name; 
             if ($s_name eq 'HGMD'){
@@ -539,12 +544,14 @@ sub writeToSheet{
             }
         }
     }
-    $xl_obj->writeLine
-    (
-        line       => \@row, 
-        worksheet  => $sheets{$s_name},
-        succeeding => \@split_cells,
-    );
+    if (not $opts{n} or $variant_has_valid_sample){
+        $xl_obj->writeLine
+        (
+            line       => \@row, 
+            worksheet  => $sheets{$s_name},
+            succeeding => \@split_cells,
+        );
+    }
 }
 ###########################################################
 #kept for legacy in case need to switch back to ClinVar VCF
@@ -1119,8 +1126,8 @@ sub rankTranscripts{
 sub getTranscriptsRanks{
     my $symbol = shift;
     my $transcript = shift; 
-    return -1 if not exists $refseq_ranks{$symbol};
-    my $idx = first { $refseq_ranks{$symbol}->[$_] eq $transcript } 0 ..  $#{$refseq_ranks{$symbol}}; #also returns undef if transcript not found
+    return -1 if not exists $transcript_ranks{$symbol};
+    my $idx = first { $transcript_ranks{$symbol}->[$_] eq $transcript } 0 ..  $#{$transcript_ranks{$symbol}}; #also returns undef if transcript not found
     return -1 if not defined $idx;
     return $idx;
 }
@@ -1132,7 +1139,7 @@ sub setTranscriptsRanks{
     chomp (my @head = split("\t", $header)); 
     my $n = 0;
     my %tr_columns = map { lc($_) => $n++ } map { (my $trim = $_) =~ s/^#+//; $trim } @head;
-    foreach my $req ( qw / symbol refseq / ){
+    foreach my $req ( qw / symbol transcript / ){
         if (not exists  $tr_columns{$req}){
             die "Could not find required column '$req' in header of --transcripts file $opts{t}. Found the following columns:\n" . join("\n", @head) . "\n";
         }
@@ -1141,8 +1148,8 @@ sub setTranscriptsRanks{
     while (my $line = <$TR>){
         my @split = split("\t", $line); 
         my $symbol = uc($split[ $tr_columns{symbol} ]);
-        my $transcript = uc ($split[ $tr_columns{refseq} ]); 
-        push @{$refseq_ranks{$symbol} }, $transcript; 
+        my $transcript = uc ($split[ $tr_columns{transcript} ]); 
+        push @{$transcript_ranks{$symbol} }, $transcript; 
     }
 }
 
@@ -1258,6 +1265,10 @@ Input VCF file (prefiltered on public databases for allele frequency).
 =item B<-o    --output>
 
 Output xlsx file. Defaults to input file with .xlsx extension added.
+
+=item B<-n    --no_blanks>
+
+Do not output variants which do not have at least one sample passing the variant criteria.
 
 =item B<-m    --hgmd>
 
