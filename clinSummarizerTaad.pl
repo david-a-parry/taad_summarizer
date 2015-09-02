@@ -24,6 +24,7 @@ use TextToExcel;
 my $progressbar;
 my @allele_balance = ();
 my $min_gq = 0; 
+my %seq_cache = ();
 my %opts = (b => \@allele_balance, g => $min_gq);
 GetOptions(
     \%opts,
@@ -39,6 +40,7 @@ GetOptions(
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
     'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
+    's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
     'p|progress',        #show a progress bar?
     'v|verbose',         #print extra progress information
     'h|?|help',
@@ -449,6 +451,7 @@ sub writeToSheet{
         #check if in collagen domain
         if (exists $csq_to_report->{glyxy}){
             $s_name = "CollagenGlyXY";
+            push @row, $csq_to_report->{glyxy_pos};
             push @row, $csq_to_report->{domain_coords};
         #check if damaging or benign...
         }elsif ($allele_cadd  >= 10 and 
@@ -850,6 +853,7 @@ sub getHeaders{
             Polyphen
             SIFT
             Domains
+            DomainPosition
             DomainCoordinates
             CADD
             Sample
@@ -946,50 +950,68 @@ sub checkCollagenDomain{
 # a number of amino acids not divisible by 3
     my $csq_array = shift;#ref to array of VEP consequences 
     foreach my $c (@$csq_array){
-        next if not $c->{domains};
-        my @domains = split ("&", $c->{domains}); #domains variant overlaps
-        if (grep { /Pfam_domain:PF01391/i } @domains){
+        my $dom_hash;
+        my $gxy_frame = 0;
+        my $gxy_length;
+        if (not $opts{s}){#if not using the --scan_gxy option
+            next if not $c->{domains};
+            my @domains = split ("&", $c->{domains}); #domains variant overlaps
+            if (grep { /Pfam_domain:PF01391/i } @domains){
+                if ($opts{v}){
+                    informUser("Found variant in collagen triple helix\n");
+                    informUser("Checking domain sequence using Ensembl REST...\n");
+                }
+        #get coordinates of domains to find Gly-X-Y pattern using ensembl REST API
+                #my $seq_hash  = ensRestQuery("$server/sequence/id/$c->{ensp}?"); 
+                my $rest_url = "$server/overlap/translation/$c->{ensp}?";
+                my $pfam_ar = ensRestQuery($rest_url);
+                if (ref $pfam_ar ne 'ARRAY'){
+                    die "Required array reference from Ensembl REST query: $rest_url\n" 
+                }
+                $dom_hash = findOverlappingDomain($pfam_ar, "PF01391", $c);
+                
+                # CHECK SEQ TO MAKE FIND 'FRAME' of GLY-X-Y repeat 
+                my $seq_hash = getProteinSequence($c->{ensp}); 
+                $dom_hash->{seq} = substr(
+                                    $seq_hash->{seq}, 
+                                    $dom_hash->{start} -1,  
+                                    $dom_hash->{end} - $dom_hash->{start} + 1, 
+                ); 
+                #find the first repeat of 5 or more Gly-X-Ys 
+                # -- TO DO - more sophisticated HMM perhaps?
+                if ($opts{v}){
+                    informUser("domain $dom_hash->{id}: $dom_hash->{start}-$dom_hash->{end} - $dom_hash->{seq}\n");
+                    informUser("frame: $gxy_frame\n");
+                }
+            }
+        }else{
+            #scan sequence ourselves for GXY repeats
+            next if not $c->{ensp};#skip non-coding
+            next if $c->{symbol} !~ /^COL/;#skip non-collagens
+            next if not $c->{amino_acids};#skip any non-coding variant
+            my $seq_hash = getProteinSequence($c->{ensp}); 
+            $dom_hash = findGlyXY($seq_hash->{seq}, $c); 
+            if ($dom_hash and $opts{v}){
+                informUser("Found putative Gly-X-Y domain in $c->{symbol} ($c->{ensp}) $dom_hash->{start}-$dom_hash->{end}:\n$dom_hash->{seq}\n");
+            }
+        }#limitation at the moment - does not allow for deletion spanning more than one GlyXY domains
+        if ($dom_hash){
+            $gxy_length =  1 + $dom_hash->{end} - $dom_hash->{start}; 
+            if ($dom_hash->{seq} =~ /(G[A-Z]{2}){5,}/){
+                $gxy_frame = $-[0] % 3;
+                $gxy_length -= $gxy_frame;
+            }else{
+                die "Could not find Gly-X-Y repeat in PF01391 domain seq:\n$dom_hash->{seq}\n\n";
+            }
             my @aa = split ("/", $c->{amino_acids} ) ;
             s/-// for @aa; #turn deleted AAs to empty strings
-            if ($opts{v}){
-                informUser("Found variant in collagen triple helix\n");
-                informUser("Checking domain sequence using Ensembl REST...\n");
-            }
-    #get coordinates of domains to find Gly-X-Y pattern using ensembl REST API
-            #my $seq_hash  = ensRestQuery("$server/sequence/id/$c->{ensp}?"); 
-            my $rest_url = "$server/overlap/translation/$c->{ensp}?";
-            my $pfam_ar = ensRestQuery($rest_url);
-            if (ref $pfam_ar ne 'ARRAY'){
-                die "Required array reference from Ensembl REST query: $rest_url\n" 
-            }
-            my $dom_hash = findOverlappingDomain($pfam_ar, "PF01391", $c);
-            
-            # CHECK SEQ TO MAKE FIND 'FRAME' of GLY-X-Y repeat 
-            $rest_url = "$server/sequence/id/$c->{ensp}?";
-            my $seq_hash = ensRestQuery($rest_url);
-            die "No sequence returned from REST query: $rest_url\n" if not $seq_hash->{seq};
-            my $domain_seq = substr(
-                                $seq_hash->{seq}, 
-                                $dom_hash->{start} -1,  
-                                $dom_hash->{end} - $dom_hash->{start} + 1, 
-            ); 
-            #find the first repeat of 5 or more Gly-X-Ys 
-            # -- TO DO - more sophisticated HMM perhaps?
-            my $gxy_frame;
-            if ($domain_seq =~ /(G[A-Z]{2}){5,}/){
-                $gxy_frame = $-[0] % 3;
-            }else{
-                die "Could not find Gly-X-Y repeat in PF01391 domain seq:\n$domain_seq\n\n";
-            }
-            if ($opts{v}){
-                informUser("domain PF01391: $dom_hash->{start}-$dom_hash->{end} - $domain_seq\n");
-                informUser("frame: $gxy_frame\n");
-            }
             if (length($aa[0]) == length($aa[1])){
                 #check whether an essential glycine has been altered
                 if (essentialGlyAltered(\@aa, $c, $dom_hash->{start} + $gxy_frame, $dom_hash->{end})){
+                    my $gxy_pos = 1 + $c->{protein_position} - $dom_hash->{start}; 
+                    $c->{glyxy_pos} = "$gxy_pos/$gxy_length";
                     $c->{glyxy} = 1;
-                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    $c->{domain_coords} = "$dom_hash->{id}: $dom_hash->{start}-$dom_hash->{end}"; 
                     return $c;
                 }
             }else{
@@ -1019,14 +1041,17 @@ sub checkCollagenDomain{
                 #if not divisible by 3 then triple helix broken
                 if ($diff % 3){
                     $c->{glyxy} = 1;
-                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    $c->{domain_coords} = "$dom_hash->{id}: $dom_hash->{start}-$dom_hash->{end}"; 
                     return $c;
                 }
                 # if divisible by 3 check if a pos that should be a 
                 # glycine has been altered
                 if (essentialGlyAltered(\@aa, $c, $dom_hash->{start} + $gxy_frame, $dom_hash->{end})){
                     $c->{glyxy} = 1;
-                    $c->{domain_coords} = "PF01391: $dom_hash->{start}-$dom_hash->{end}"; 
+                    my $start_distance = $p_start > $dom_hash->{start} ? 1 + $p_start - $dom_hash->{start} : 1;
+                    my $end_distance   = $p_end   < $dom_hash->{end}   ? 1 +  $p_end  - $dom_hash->{start} : "";
+                    $c->{glyxy_pos} = "$start_distance-$end_distance/$gxy_length";
+                    $c->{domain_coords} = "$dom_hash->{id}: $dom_hash->{start}-$dom_hash->{end}"; 
                     return $c;
                 }
             }
@@ -1035,14 +1060,76 @@ sub checkCollagenDomain{
 }
 
 ###########################################################
+sub findGlyXY{
+    my ($seq, $csq) = @_; 
+    my @gxys = scanForGlyXY($seq);
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start; 
+    foreach my $hash (@gxys){
+        if ($hash->{start} <= $p_start and $hash->{end} >= $p_start){
+            #variant lies within this domain
+            return $hash;
+        }elsif ($hash->{start} <= $p_end and $hash->{end} >= $p_end){
+            return $hash;
+        }
+    }
+    return undef;
+}
+
+###########################################################
+sub scanForGlyXY{
+    my $seq = shift;
+    my @glyxys = ();
+    my $n = 0;
+    while ($seq =~ /((G[A-Z]{2}){5,})/g){
+        my %dom = (); 
+        $n++;
+        $dom{start} = $-[0] + 1;
+        $dom{end} = $-[0] + length($1);
+        $dom{id} = "glyxy-$n";
+        push @glyxys, \%dom;
+    }
+    #merge hashes within 6 aa of each other to allow for
+    #occasional non-gly-x-y triplets
+    my $prev_hash = $glyxys[0];
+    my @merged = ();
+    for (my $i = 1; $i < @glyxys; $i++){
+        my $gap = $glyxys[$i]->{start} - $prev_hash->{end};
+        if ($gap == 7 or $gap == 4){
+            $prev_hash->{end} = $glyxys[$i]->{end};
+        }else{
+            $prev_hash->{seq} = substr(
+                              $seq,
+                              $prev_hash->{start} -1,  
+                              $prev_hash->{end} - $prev_hash->{start} + 1, 
+            );
+            push @merged, $prev_hash;
+            $prev_hash = $glyxys[$i];
+        }
+    }
+    if ($prev_hash){
+        $prev_hash->{seq} = substr(
+                          $seq,
+                          $prev_hash->{start} -1,  
+                          $prev_hash->{end} - $prev_hash->{start} + 1, 
+        );
+        push @merged, $prev_hash ;
+    }
+    return @merged;
+}
+        
+
+
+###########################################################
 sub essentialGlyAltered{
     #return 1 if Gly at pos 0, 3, 6, etc. of domain altered
     my ($aa, $c, $dom_start, $dom_end) = @_;
     # ref to amino acid array (ref and alt), VEP csq hash ref 
     # and domain details hash ref
+    my ($p_start, $p_end) = split("-", $c->{protein_position}); 
     my @gly_idxs = grep { substr($aa->[0], $_, 1) eq "G" } 0..(length($aa->[0]));
     foreach my $i (@gly_idxs){
-        my $pos = $i + $c->{protein_position};#actual protein pos of this Gly
+        my $pos = $i + $p_start ;#actual protein pos of this Gly
         next if $pos < $dom_start;
         last if $pos > $dom_end;
         my $dist = $pos - $dom_start;#distance of Gly from domain start
@@ -1053,7 +1140,7 @@ sub essentialGlyAltered{
     }
     #if insertion, check we have Glys in the right positions
     if (length($aa->[0]) < length($aa->[1])){
-        my $frame = ($c->{protein_position} - $dom_start) % 3 ;
+        my $frame = ($p_start - $dom_start) % 3 ;
         for (my $i = 0; $i < length($aa->[1]); $i += 3){
             next if $i < length($aa->[0]); #only check the remaining portion of seq not in the Ref AAs
             my $res = substr($aa->[1], $i + $frame, 1);
@@ -1102,6 +1189,17 @@ sub findOverlappingDomain{
         }
     }
     die "No overlap found with $id domain for $csq->{hgvsc}/$csq->{hgvsp} in REST database\n";
+}
+###########################################################
+sub getProteinSequence{
+    my $ensp = shift;
+    if (not exists $seq_cache{$ensp}){
+        my $rest_url = "$server/sequence/id/$ensp";
+        $seq_cache{$ensp} = ensRestQuery($rest_url);
+        die "No sequence returned from REST query: $rest_url\n" if not $seq_cache{$ensp}->{seq};
+    }
+    return $seq_cache{$ensp};
+
 }
 ###########################################################
 sub ensRestQuery{
