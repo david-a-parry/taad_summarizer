@@ -1134,6 +1134,9 @@ sub essentialGlyAltered{
         last if $pos > $dom_end;
         my $dist = $pos - $dom_start;#distance of Gly from domain start
         next if $dist % 3; #not an essential Gly if not at pos 0 of 3 aa repeat
+        if ($i > length($aa->[1])){#Essential Gly deleted(?)
+            return 1;
+        }
         if (substr($aa->[1], $i, 1) ne 'G'){ # Essential Gly altered
             return 1;
         }
