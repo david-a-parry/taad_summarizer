@@ -41,8 +41,10 @@ GetOptions(
     'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
     's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
-    'p|progress',        #show a progress bar?
-    'v|verbose',         #print extra progress information
+    'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
+    'validations_file=s', #read a tab delimited file of validationss and coordinates to assign validation status
+    'p|progress',       #show a progress bar?
+    'v|verbose',        #print extra progress information
     'h|?|help',
     'manual',
 ) or pod2usage(-exitval => 2, -message => "Syntax error.\n"); 
@@ -63,6 +65,20 @@ die "VCF header not OK for $opts{i}\n" if not VcfReader::checkHeader(header => \
 my %samples_to_columns = VcfReader::getSamples(header => \@vhead, get_columns => 1);
 my %vep_fields         = VcfReader::readVepHeader(header => \@vhead);
 my $total_var;
+
+#check primer_file if supplied
+my @primers = (); #create an array of hash refs with id, chr, start, end, f and r keys
+if ($opts{primer_file}){
+    informUser("Checking primer file\n");
+    @primers = readPrimerFile();
+}
+
+#check validations_file if supplied
+my %validated = (); #key is variant unique ID, value is 1 for validated, 2 for did not validate, 0 for not done
+if ($opts{validations_file}){
+    informUser("Checking validations file\n");
+    %validated = readValidationsFile();
+}
 
 #check HGMD VCF and retrieve search arguments 
 
@@ -141,6 +157,7 @@ if ($progressbar){
 if ($FILTER_OUT){
     close $FILTER_OUT;
 }
+$progressbar = undef;
 informUser("Done writing variant sheets - writing sample summary...\n"); 
 writeSampleSummary();
 informUser("Done.\n");
@@ -182,6 +199,57 @@ sub getClinVarSearchArgs{
     my $iterator = Tabix->new(-data =>  $bgz, -index => $index) ;
     my %sargs = ( tabix_iterator => $iterator, columns => $clinVarCols ); 
     return %sargs;
+}
+###########################################################
+sub readValidationsFile{
+    my %val = (); #key is variant unique ID, value is 1 for validated, 2 for did not validate, 0 for not done
+    open (my $VAL, $opts{validations_file}) 
+      or die "Can't open validations file $opts{validations_file}: $!\n";
+    chomp (my $header= <$VAL>);
+    my $n = 0;
+    my @c = split ("\t", $header); 
+    my %cols = map { $_ => $n++ } @c;
+    my @fields =  qw / UID VALIDATED / ;
+    foreach my $f (@fields){
+        if (not exists $cols{$f}){
+            die "Could not find required column '$f' in validation file!\n";
+        }
+    }
+    while ( chomp(my $line = <$VAL>) ){
+        my @split = split("\t", $line); 
+        $val{$split[ $cols{UID} ] } = $split[ $cols{VALIDATED} ] ;
+    }
+    close $VAL;
+    return %val;
+}
+###########################################################
+sub readPrimerFile{
+    open (my $PRIMERS, $opts{primer_file}) 
+      or die "Can't open primer file $opts{primer_file}: $!\n";
+    my @prime = (); #create an array of hash refs with id, chr, start, end, f and r keys
+    chomp (my $header = <$PRIMERS>);
+    my $n = 0;
+    my @c = split ("\t", $header); 
+    my %cols = map { $_ => $n++ } @c;
+    my @fields =  qw / ID CHROM START END F R / ;
+    foreach my $f (@fields){
+        if (not exists $cols{$f}){
+            die "Could not find required column '$f' in primers file!\n";
+        }
+    }
+    while ( chomp(my $line = <$PRIMERS>) ){
+        my @split = split("\t", $line); 
+        my %pr = map { $_ => $split[ $cols{$_} ] } @fields;
+        push @prime, \%pr; 
+    }
+    close $PRIMERS;
+    @prime = sort {   
+            $a->{CHROM} cmp $b->{CHROM} ||
+            $a->{START} cmp $b->{START} || 
+            $a->{END} cmp $b->{END}     || 
+            $a->{ID} cmp $b->{ID}
+    } @prime;
+    return @prime;
 }
 ###########################################################
 sub checkClinvarFile{
@@ -328,6 +396,7 @@ sub writeToSheet{
     }
     my @row = (); #values to write out to excel sheet
     my @split_cells = (); #values to write in split cells spanning row
+    my @primer_hits = (); #primers that could PCR variant if $opts{primer_file}
     my %hgmd = ();#keys are HGMD fields, values are array refs of values
     #collect HGMD database annotations if found
     if (@$matches){
@@ -383,6 +452,11 @@ sub writeToSheet{
             Amino_acids
             protein_position
             ensp
+            LoF
+            LoF_Filter
+            LoF_info
+            LoF_flags
+
       /;
 
     my @vep_csq = VcfReader::getVepFields
@@ -447,6 +521,9 @@ sub writeToSheet{
         $s_name = "ClinVarPathogenic";
     }elsif (exists $lofs{$most_damaging_csq}){
         $s_name = "LOF";
+        foreach my $lof (qw / lof lof_filter lof_info lof_flags /){
+            push @row, $csq_to_report->{$lof};
+        }
     }elsif ($most_damaging_csq eq 'missense_variant'){
         #check if in collagen domain
         if (exists $csq_to_report->{glyxy}){
@@ -478,6 +555,20 @@ sub writeToSheet{
     
     push @row, $allele_cadd;
     
+    my $uid_base = sprintf
+        (
+            "%s:%s-%s/%s-", 
+            $var->{CHROM},  
+            $var->{ORIGINAL_POS},
+            $var->{ORIGINAL_REF},
+            $var->{ORIGINAL_ALT},
+        ); #we add sample IDS to this string to create UIDs for sample variants
+
+    #TO DO
+    #search primers
+    if (@primers){
+        @primer_hits = searchPrimers($var);
+    }
     #add sample info to new array of array refs to be written 
     # in split cells alongside global variant fields
     my %samp_gts = VcfReader::getSampleActualGenotypes
@@ -530,7 +621,24 @@ sub writeToSheet{
                 }
             }
             $variant_has_valid_sample++;
-            push @split_cells, [$s, $samp_gts{$s}, $samp_ads{$s}, $ab, $samp_gqs{$s}];
+            my $uid = "$uid_base$s";
+            my @sample_cells = ( $s, $samp_gts{$s}, $samp_ads{$s}, $ab, $samp_gqs{$s}, $uid );
+            if (@primers){
+                if (@primer_hits){
+                    push @sample_cells, join("/", @primer_hits); 
+                }else{
+                    push @sample_cells, '-';
+                }
+            }
+            if (%validated){
+                #search validations
+                if (exists $validated{$uid}){
+                    push @sample_cells, $validated{$uid};
+                }else{
+                    push @sample_cells, 0;
+                }
+            }
+            push @split_cells, \@sample_cells;
             my $var_class = $s_name; 
             if ($s_name eq 'HGMD'){
                 if (grep {$_ eq 'DM'} @{$hgmd{variant_class}}){
@@ -556,6 +664,56 @@ sub writeToSheet{
         );
     }
 }
+###########################################################
+sub searchPrimers{
+#returns array of matching primer IDs
+    my $var = shift;
+    my @hits = (); 
+    my $u = $#primers;
+    my $l = 0;
+    my $var_end = $var->{POS} + length($var->{REF}); 
+    while ( $l <= $u ){
+        my $i = int ( ( $u + $l ) / 2 ) ;
+        if ($var->{CHROM} lt $primers[$i]->{CHROM}){
+            $u = $i - 1;
+        }elsif ($var->{CHROM} gt $primers[$i]->{CHROM}){
+            $l = $i + 1;
+        }else{#same chrom
+            my $target_start = $primers[$i]->{START} + length( $primers[$i]->{F} ) + 50;
+            my $target_end = $primers[$i]->{END} - length( $primers[$i]->{R} ) - 50;
+                #require primers to be at least 50 bp away from target nucleotide
+            if ($var->{POS} < $target_start){
+                $u = $i -1;
+            }elsif($var_end > $target_end){
+                $l = $i + 1;
+            }else{
+                push @hits, $primers[$i]->{ID};
+                #search for hits either site;
+                for (my $j = $i - 1; $j >= 0; $j--){
+                    my $t_start = $primers[$j]->{START} + length( $primers[$j]->{F} ) + 50;
+                    my $t_end = $primers[$j]->{END} - length( $primers[$j]->{R} ) - 50;
+                    if ($var->{POS} >= $t_start && $var_end <= $t_end){
+                        push @hits, $primers[$j]->{ID};
+                    }else{
+                        last if $var_end < $t_start;
+                    }
+                } 
+                for (my $j = $i + 1; $j < @primers; $j++){
+                    my $t_start = $primers[$j]->{START} + length( $primers[$j]->{F} ) + 50;
+                    my $t_end = $primers[$j]->{END} - length( $primers[$j]->{R} ) - 50;
+                    if ($var->{POS} >= $t_start && $var_end <= $t_end){
+                        push @hits, $primers[$j]->{ID};
+                    }else{
+                        last if $var->{POS} > $t_end;
+                    }
+                }
+                return @hits;
+            }
+        }
+    }
+    return @hits;
+}
+
 ###########################################################
 #kept for legacy in case need to switch back to ClinVar VCF
 sub getClinVarCodeVcf{
@@ -774,6 +932,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            UID
      /);
     @{$h{LOF}} =  ( 
         qw / 
@@ -793,6 +952,10 @@ sub getHeaders{
             HGVSc 
             HGVSp 
             GERP
+            LoF
+            LoF_Filter
+            LoF_info
+            LoF_flags
             Domains
             CADD
             Sample
@@ -800,6 +963,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            UID
      /);
     
     @{$h{clinvar}} =  ( 
@@ -830,6 +994,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            UID
      /);
 
     @{$h{glyxy}} =  ( 
@@ -861,6 +1026,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            UID
      /);
 
 
@@ -893,6 +1059,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            UID
      /);
 
     @{$h{sample}} =  (  
@@ -908,6 +1075,16 @@ sub getHeaders{
             Other
             /
     );
+    if ($opts{primer_file}){
+        foreach my $k (keys %h){
+            push @{$h{$k}}, "primers";
+        }
+    }
+    if ($opts{validations_file}){
+        foreach my $k (keys %h){
+            push @{$h{$k}}, "validated?(1=yes,2=no,0=not_done)";
+        }
+    }
     return %h;
 }
 ###########################################################
