@@ -215,7 +215,8 @@ sub readValidationsFile{
             die "Could not find required column '$f' in validation file!\n";
         }
     }
-    while ( chomp(my $line = <$VAL>) ){
+    while ( my $line = <$VAL> ){
+        chomp $line;
         my @split = split("\t", $line); 
         $val{$split[ $cols{UID} ] } = $split[ $cols{VALIDATED} ] ;
     }
@@ -237,7 +238,8 @@ sub readPrimerFile{
             die "Could not find required column '$f' in primers file!\n";
         }
     }
-    while ( chomp(my $line = <$PRIMERS>) ){
+    while ( my $line = <$PRIMERS> ){
+        chomp $line;
         my @split = split("\t", $line); 
         my %pr = map { $_ => $split[ $cols{$_} ] } @fields;
         push @prime, \%pr; 
@@ -245,8 +247,8 @@ sub readPrimerFile{
     close $PRIMERS;
     @prime = sort {   
             $a->{CHROM} cmp $b->{CHROM} ||
-            $a->{START} cmp $b->{START} || 
-            $a->{END} cmp $b->{END}     || 
+            $a->{START} <=> $b->{START} || 
+            $a->{END} <=> $b->{END}     || 
             $a->{ID} cmp $b->{ID}
     } @prime;
     return @prime;
@@ -904,8 +906,8 @@ sub getHeaders{
         qw / 
             index
             Hgmd_ID
-            variant_class
             Disease
+            variant_class
             HGMD_Symbol
             HGVS
             ClinVarSig
@@ -952,11 +954,11 @@ sub getHeaders{
             HGVSc 
             HGVSp 
             GERP
+            Domains
             LoF
             LoF_Filter
             LoF_info
             LoF_flags
-            Domains
             CADD
             Sample
             GT
@@ -1424,6 +1426,7 @@ sub setTranscriptsRanks{
     }
 
     while (my $line = <$TR>){
+        chomp $line;
         my @split = split("\t", $line); 
         my $symbol = uc($split[ $tr_columns{symbol} ]);
         my $transcript = uc ($split[ $tr_columns{transcript} ]); 
