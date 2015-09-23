@@ -44,6 +44,8 @@ GetOptions(
     'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
     'validations_file=s', #read a tab delimited file of validationss and coordinates to assign validation status
     'p|progress',       #show a progress bar?
+    'x|do_not_merge',    #do not merge cells
+    '1|single_sheet',
     'v|verbose',        #print extra progress information
     'h|?|help',
     'manual',
@@ -180,7 +182,7 @@ sub writeSampleSummary{
                 $sample_sheet->write($row, $col, $s)
             }elsif (exists $sample_vars{$s}->{$field} ){
                 $sample_sheet->write($row, $col, scalar @{$sample_vars{$s}->{$field}});
-                $sample_sheet->write_comment($row, $col,  join("\n", @{$sample_vars{$s}->{$field}}), visible => 0);
+                #$sample_sheet->write_comment($row, $col,  join("\n", @{$sample_vars{$s}->{$field}}), visible => 0);
             }else{
                 $sample_sheet->write($row, $col, 0);
             }
@@ -401,16 +403,16 @@ sub writeToSheet{
     my @primer_hits = (); #primers that could PCR variant if $opts{primer_file}
     my %hgmd = ();#keys are HGMD fields, values are array refs of values
     #collect HGMD database annotations if found
+    my @hgmd_fields = 
+    ( qw /
+            hgmd_id
+            disease
+            variant_class
+            gene_symbol
+            hgvs
+        /
+    );
     if (@$matches){
-        my @hgmd_fields = 
-        ( qw /
-                hgmd_id
-                disease
-                variant_class
-                gene_symbol
-                hgvs
-            /
-        );
         foreach my $h (@$matches){
             my @match = split("\t", $h);
             foreach my $f (@hgmd_fields){
@@ -421,12 +423,17 @@ sub writeToSheet{
         foreach my $f (@hgmd_fields){
             push @row, join(",", @{$hgmd{$f}});
         }
+    }elsif($opts{1}){
+        foreach my $f (@hgmd_fields){
+            push @row, join("-");
+        }
     }
+        
     #collect ClinVar database annotations if found
     my ($clnSig, $clnTraits, $cvarPathognic, $cvarConflicted) 
                          = getClinSig($clinvar_matches, $var);
     push @row, $clnSig, $clnTraits; 
-    if ($cvarPathognic and not @$matches){
+    if ( ($cvarPathognic and not @$matches ) or $opts{1} ){
         push @row, $cvarConflicted;
     }
     
@@ -449,7 +456,6 @@ sub writeToSheet{
             hgvsp
             polyphen
             sift
-            GERP++_RS
             DOMAINS
             Amino_acids
             protein_position
@@ -490,16 +496,8 @@ sub writeToSheet{
     }
     my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
     
-    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp GERP++_RS/ );
+    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp / );
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
-    if (@$matches or 
-        $most_damaging_csq eq 'missense_variant' or  
-        $most_damaging_csq eq 'protein_altering_variant' or  
-        $most_damaging_csq =~  /^inframe_(inser|dele)tion$/
-    ){
-        push @vep_fields, qw /polyphen sift/;
-    }
-    push @vep_fields, 'domains';
     foreach my $f (@vep_fields){
         push @row, $csq_to_report->{$f};
     }
@@ -523,15 +521,10 @@ sub writeToSheet{
         $s_name = "ClinVarPathogenic";
     }elsif (exists $lofs{$most_damaging_csq}){
         $s_name = "LOF";
-        foreach my $lof (qw / lof lof_filter lof_info lof_flags /){
-            push @row, $csq_to_report->{$lof};
-        }
     }elsif ($most_damaging_csq eq 'missense_variant'){
         #check if in collagen domain
-        if (exists $csq_to_report->{glyxy}){
+        if (exists $csq_to_report->{glyxy} ){
             $s_name = "CollagenGlyXY";
-            push @row, $csq_to_report->{glyxy_pos};
-            push @row, $csq_to_report->{domain_coords};
         #check if damaging or benign...
         }elsif ($allele_cadd  >= 10 and 
             $csq_to_report->{polyphen} =~ /damaging/i and 
@@ -554,9 +547,27 @@ sub writeToSheet{
     }else{
         $s_name = "Other";
     }
+
+    push @row, $csq_to_report->{domains};
+    if ($s_name eq "CollagenGlyXY" or $opts{1}){
+        push @row, $csq_to_report->{glyxy_pos};
+        push @row, $csq_to_report->{domain_coords};
+    }
     
+
+    if ($s_name eq 'LOF' or $opts{1}){
+        foreach my $lof (qw / lof lof_filter lof_info lof_flags /){
+            push @row, $csq_to_report->{$lof};
+        }
+    }
+    
+    if ($s_name ne 'LOF' or $opts{1}){
+        push @row, $csq_to_report->{polyphen};
+        push @row, $csq_to_report->{sift};
+    }
+
     push @row, $allele_cadd;
-    
+
     my $uid_base = sprintf
         (
             "%s:%s-%s/%s-", 
@@ -651,19 +662,35 @@ sub writeToSheet{
             }
             {
                 no warnings 'uninitialized';
-                push @{$sample_vars{$s}->{$var_class}}, join("|", @row);
+                push @{$sample_vars{$s}->{$var_class}}, join("|", @row, @sample_cells);
             }
         }
     }
     if (not $opts{n} or $variant_has_valid_sample){
-        $variant_counts{$s_name}++;
-        unshift @row, $variant_counts{$s_name};
-        $xl_obj->writeLine
-        (
-            line       => \@row, 
-            worksheet  => $sheets{$s_name},
-            succeeding => \@split_cells,
-        );
+        my $category = $s_name;
+        $variant_counts{$category}++;
+        if ($opts{1}){
+            $s_name = 'Variants';
+            unshift @row, $category;
+        }
+        unshift @row, "$category.$variant_counts{$category}";
+        if ($opts{x}){ #do not merge
+            foreach my $s (@split_cells){
+                my @full_line = (@row, @$s); 
+                $xl_obj->writeLine
+                (
+                    line => \@full_line,
+                    worksheet  => $sheets{$s_name},
+                );
+            }
+        }else{
+            $xl_obj->writeLine
+            (
+                line       => \@row, 
+                worksheet  => $sheets{$s_name},
+                succeeding => \@split_cells,
+            );
+        }
     }
 }
 ###########################################################
@@ -870,29 +897,30 @@ sub setupOutput{
     }else{
         $opts{o} .= ".xlsx" if $opts{o} !~ /\.xlsx$/;
     }
-    $xl_obj = TextToExcel->new( file=> $opts{o}, name => "HGMD");
-    $sheets{HGMD} = 0;
-    $header_formatting = $xl_obj->createFormat(bold => 1);
-    $url_format = $xl_obj->createFormat(
-        color     => 'blue',
-        underline => 1,
-    );  
-    writeHeader($sheets{HGMD}, $headers{HGMD});
+#    $url_format = $xl_obj->createFormat(
+#        color     => 'blue',
+#        underline => 1,
+#    );  
+    if ($opts{1}){
+        $xl_obj = TextToExcel->new( file=> $opts{o}, name => "Variants");
+        $sheets{Variants} = 0;
+        $header_formatting = $xl_obj->createFormat(bold => 1);
+        writeHeader($sheets{Variants}, $headers{Variants});
+    }else{
+        $xl_obj = TextToExcel->new( file=> $opts{o}, name => "HGMD");
+        $header_formatting = $xl_obj->createFormat(bold => 1);
+        writeHeader($sheets{HGMD}, $headers{HGMD});
+        $sheets{HGMD} = 0;
+        $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{clinvar});
+        $sheets{LOF} = addSheet("LOF", $headers{LOF});
+        $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{glyxy});
+        $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{missense});
+        $sheets{BenignMissense} = addSheet("BenignMissense", $headers{missense});
+        $sheets{Other} = addSheet("Other", $headers{LOF});
+    }
 
-    $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{clinvar});
-
-    $sheets{LOF} = addSheet("LOF", $headers{LOF});
-    
-    $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{glyxy});
-    
-    $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{missense});
-
-    $sheets{BenignMissense} = addSheet("BenignMissense", $headers{missense});
-
-    $sheets{Other} = addSheet("Other", $headers{LOF});
-    
     $sheets{SampleSummary} = addSheet("Sample Summary", $headers{sample});
-    
+        
     if ($opts{f}){
         open ($FILTER_OUT, ">$opts{f}") or die "Could not create filter output file \"$opts{f}\": $!\n";
         print $FILTER_OUT join("\n", @vhead) . "\n";
@@ -902,6 +930,50 @@ sub setupOutput{
 ###########################################################
 sub getHeaders{
     my %h = ();
+
+    @{$h{Variants}} =  ( #header if only outputting single sheet
+        qw/
+            index
+            Category
+            Hgmd_ID
+            Disease
+            variant_class
+            HGMD_Symbol
+            HGVS
+            ClinVarSig
+            ClinVarTrait
+            ClinVarConflicted
+            Chrom
+            Pos
+            Ref
+            Alt
+            ID
+            Qual
+            Filter
+            Symbol
+            Feature
+            Consequence 
+            HGVSc 
+            HGVSp 
+            Domains
+            DomainPosition
+            DomainCoordinates
+            LoF
+            LoF_Filter
+            LoF_info
+            LoF_flags
+            Polyphen
+            SIFT
+            CADD
+            Sample
+            GT
+            AD
+            AB
+            GQ
+            UID
+        /
+    );
+
     @{$h{HGMD}} =  ( 
         qw / 
             index
@@ -924,10 +996,9 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
-            GERP
+            Domains
             Polyphen
             SIFT
-            Domains
             CADD
             Sample
             GT
@@ -953,7 +1024,6 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
-            GERP
             Domains
             LoF
             LoF_Filter
@@ -986,10 +1056,9 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
-            GERP
+            Domains
             Polyphen
             SIFT
-            Domains
             CADD
             Sample
             GT
@@ -1016,12 +1085,11 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
-            GERP
-            Polyphen
-            SIFT
             Domains
             DomainPosition
             DomainCoordinates
+            Polyphen
+            SIFT
             CADD
             Sample
             GT
@@ -1051,10 +1119,9 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
-            GERP
+            Domains
             Polyphen
             SIFT
-            Domains
             CADD    
             Sample
             GT
