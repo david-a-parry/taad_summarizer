@@ -1193,7 +1193,7 @@ sub splitMultiAllelicVariants{
     my @alleles = split(",", $self->{_currentVar}->{ALT});
     return  $self->{_currentLine} if (@alleles < 2);#not multiallelic
     my @splitLines = ();
-    $self->getFormatFields();
+    $self->getVariantFormatFields();
     my %ac = $self->countAlleles();
     my $an = 0;
     map {$an += $ac{$_}} keys %ac;
@@ -1507,7 +1507,7 @@ sub isMultiAllelic{
     return 0;
 }
 
-sub getFormatFields{
+sub getVariantFormatFields{
     my ($self) = @_;
     if (not defined ($self->{_fields}->{FORMAT})){
         carp "No FORMAT field in VCF "; 
@@ -1680,6 +1680,46 @@ sub getSampleCall{
     carp "getSampleCall called in a void context ";
 }
 
+sub getSampleAlleleDepths{
+#returns array of allele depths for REF and ALT alleles for given sample
+    my ($self, $sample) = @_;
+    croak "Can't invoke getSampleAlleleDepth method when no samples/genotypes are present in VCF " if not defined $self->{_samples};
+    croak "a sample must be passed to getSampleGenotypeField " if not defined $sample ;
+    my @ad = ();
+    $self->getVariantFormatFields();
+    if (defined $self->{_currentVar}->{varFormat}->{AD}){
+        @ad = split
+            (",", 
+                    $self->getSampleGenotypeField
+                    (
+                        sample => $sample,
+                        field  => 'AD',
+                    )
+            );
+    }elsif (defined $self->{_currentVar}->{varFormat}->{RO} and
+            defined $self->{_currentVar}->{varFormat}->{AO}){
+            #freebaye allele observation counts
+        my $ro = $self->getSampleGenotypeField   
+                    (
+                        sample => $sample,
+                        field  => 'RO',
+                    );
+        my $ao = $self->getSampleGenotypeField   
+                    (
+                        sample => $sample,
+                        field  => 'AO',
+                    );
+        
+        if (defined $ro and defined $ao){
+            push @ad, $ro;
+            push @ad, split(",", $ao);
+        }
+    }else{
+       carp "Cannot get allele depth without either AD or AO and RO FORMAT fields!\n"; 
+    }
+    return @ad;
+}
+
 sub getSampleGenotypeField{
 #returns scalar value for genotype field 
 #unless multiple argument is used in which
@@ -1688,7 +1728,7 @@ sub getSampleGenotypeField{
     croak "Can't invoke getSampleGenotypeField method when no samples/genotypes are present in VCF " if not defined $self->{_samples};
     carp "WARNING Both multiple and sample arguments supplied to getSampleGenotypeField method - only multiple argument will be used " if (defined $args{multiple} and defined $args{sample});
     croak "\"field\" argument must be passed to getSampleGenotypeField - e.g. getSampleGenotypeField(field=>\"GQ\") " if not defined $args{field};
-    $self->getFormatFields();
+    $self->getVariantFormatFields();
     if (not defined $self->{_currentVar}->{varFormat}->{$args{field}}){
         carp "Field $args{field} not found for getSampleGenotypeField ";
         return;
@@ -1945,14 +1985,8 @@ sub sampleIsHomozygous{
 sub getAlleleBalance{
     my ($self, $sample, $allele) = @_;
     croak "Can't invoke checkAlleleBalance method when no samples/genotypes are present in VCF " if not defined $self->{_samples};
-   my @ads = split(",", 
-        $self->getSampleGenotypeField
-            (
-            sample=>$sample, 
-            field=>'AD'
-            )
-    );
-    if (@ads == 1){
+   my @ads = $self->getSampleAlleleDepths($sample);
+   if (@ads == 1){
         return 0 if $ads[0] eq '.';
         if ($allele == 0){
             return 1;
@@ -2304,7 +2338,7 @@ ParseVCF.pm - read standard and custom Variant Call Format (VCF) files and retur
 
 DOCUMENTATION NEEDS SERIOUS ATTENTION
 #TO DO - ADD filtering on GQ etc. for sample variants, test changeHeader method
-#NEED DOCUMENTATION FOR getSampleGenotypeField, getSampleCall, getFormatFields, getAltAlleles, reopenFileHandle, searchForPosition, readPosition, getVepFields, checkSampleInVcf methods
+#NEED DOCUMENTATION FOR getSampleGenotypeField, getSampleCall, getVariantFormatFields, getAltAlleles, reopenFileHandle, searchForPosition, readPosition, getVepFields, checkSampleInVcf methods
 
 $obj = ParseVCF -> new(file => $vcf);
 #(initialise object with a VCF file)
