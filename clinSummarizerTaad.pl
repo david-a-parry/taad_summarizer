@@ -23,9 +23,8 @@ use TextToExcel;
 
 my $progressbar;
 my @allele_balance = ();
-my $min_gq = 0; 
 my %seq_cache = ();
-my %opts = (b => \@allele_balance, g => $min_gq);
+my %opts = (b => \@allele_balance);
 GetOptions(
     \%opts,
     'i|input=s',        #vcf input
@@ -37,12 +36,14 @@ GetOptions(
     'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
     'd|depth=i',         #optional min depth for sample call
     'a|allele_cutoff=f', #remove if allele is present in this proportion or more calls
+    'y|frequency=f',     #filter on this allele frequency if dbSNP/EVS/ExAC annot. found
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
     'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
     's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
     'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
     'validations_file=s', #read a tab delimited file of validationss and coordinates to assign validation status
+    'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
     'p|progress',       #show a progress bar?
     'x|do_not_merge',    #do not merge cells
     '1|single_sheet',
@@ -59,6 +60,8 @@ pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m}
 #create our http client for ensembl REST queries 
 my $http = HTTP::Tiny->new();
 my $server = $opts{r} ? $opts{r} : 'http://grch37.rest.ensembl.org';
+my $min_gq = defined $opts{g} ? 0 : $opts{g}; #default min GQ of 0
+my $af = defined $opts{y} ? 0.001 : $opts{y}; #default of 0.1 % cutoff in external databases
 
 #open VCF, get samples and get VEP annotations
 informUser("Checking input VCF\n");
@@ -66,6 +69,8 @@ my @vhead              = VcfReader::getHeader($opts{i});
 die "VCF header not OK for $opts{i}\n" if not VcfReader::checkHeader(header => \@vhead);
 my %samples_to_columns = VcfReader::getSamples(header => \@vhead, get_columns => 1);
 my %vep_fields         = VcfReader::readVepHeader(header => \@vhead);
+my %info_fields = VcfReader::getInfoFields(header => \@vhead);
+my %af_info_fields     = getAfAnnotations(\@vhead);
 my $total_var;
 
 #check primer_file if supplied
@@ -81,7 +86,14 @@ if ($opts{validations_file}){
     informUser("Checking validations file\n");
     %validated = readValidationsFile();
 }
-
+#check phenotype_file if supplied
+my $phenotypes ; # hash ref key is sample ID, value is anon hash of phenotype fields to values
+my @pheno_fields = (); #list of phenotype fields found
+if ($opts{phenotype_file}){
+    informUser("Checking phenotype file\n");
+    ($phenotypes, @pheno_fields) = readPhenotypeFile();
+    @pheno_fields = sort @pheno_fields;
+}
 #check HGMD VCF and retrieve search arguments 
 
 informUser("Checking HGMD vcf\n");
@@ -167,15 +179,60 @@ if ($xl_obj){
     $xl_obj->DESTROY();
 }
 
-
+###########################################################
+sub getAfAnnotations{
+    my $h = shift;
+    return if not $af;
+    my %af_found = ();
+    my @af_fields =  qw ( 
+        AS_CAF
+        AS_G5A
+        AS_G5
+        AS_COMMON
+        EVS_EA_AF
+        EVS_AA_AF
+        EVS_ALL_AF
+    );
+    foreach my $key (keys %info_fields){
+        my $warning = <<EOT
+[WARNING] Found expected frequency annotation ($key) in INFO fields, but 'Number' field is $info_fields{$key}->{Number}, expected 'A'. Ignoring this field.
+EOT
+;
+        my $info = <<EOT
+[INFO] Found allele frequency annotation: $key. This will be used for filtering on allele frequency.
+EOT
+;
+        if (grep { $key eq $_ } @af_fields){
+            if ($info_fields{$key}->{Number} ne 'A'){
+                print STDERR $warning;
+            }else{
+                print STDERR $info;
+                $af_found{$key} = $info_fields{$key};
+            }
+        }else{
+            if ($key =~ /^FVOV_AF_\S+$/){
+                if ($info_fields{$key}->{Number} ne 'A'){
+                    print STDERR $warning;
+                }else{
+                    print STDERR $info;
+                    $af_found{$key} = $info_fields{$key};
+                }
+            }
+        }
+    }
+    return %af_found;
+}
+ 
 ###########################################################
 sub writeSampleSummary{
     my $sample_sheet = $xl_obj->get_worksheets()->[$sheets{SampleSummary}];
     my $row = 1;
+    my %most_damaging = ();#keys are categories, values are array of sample variant array refs
     foreach my $s (
             sort {$samples_to_columns{$a} <=> $samples_to_columns{$b}} 
             keys %samples_to_columns
     ){
+        #write out numbers of each variant class per sample
         my $col = 0;
         foreach my $field ( @{$headers{sample}} ){
             if ($field eq 'Sample'){
@@ -189,8 +246,66 @@ sub writeSampleSummary{
             $col++;
         }
         $row++;
+
+        #determine most damaging consequence category for this sample
+        # and store in most damaging to allow output in order of most 
+        # likely pathogenic 
+        my @csq = sort byCsqClass keys %{$sample_vars{$s}}; 
+        if (not @csq){ #no variants for this sample
+            push @{ $most_damaging{NONE} }, [0, $s]; 
+        }else{
+            if (@{$sample_vars{$s}->{$csq[0]}} > 1){ 
+            #if multiple variants with most damaging category chose the highest CADD score
+            #CADD score will be first entry in array ref
+            
+                @{$sample_vars{$s}->{$csq[0]}} = sort {$b->[0] <=> $a->[0]} @{$sample_vars{$s}->{$csq[0]}};
+            }
+            push @{ $most_damaging{$csq[0]} }, $sample_vars{$s}->{$csq[0]}->[0]; 
+
+        }
+    }
+    foreach my $k (sort byCsqClass keys %most_damaging){
+        #order each category by CADD score
+        #CADD score will be first entry in array ref
+        foreach my $var ( sort {$b->[0] <=> $a->[0]} @{ $most_damaging{$k} } ){
+            #remove cadd score from beginning of line
+            shift @$var; 
+            $xl_obj->writeLine
+            (
+                line => $var,
+                worksheet  => $sheets{MostDamaging},
+            );
+        }        
     }
 }
+
+###########################################################
+sub byCsqClass{
+    if ($a eq $b){
+        return 0;
+    }
+    foreach my $class (qw / 
+            HGMD_DM 
+            ClinVarPathogenic 
+            LOF 
+            CollagenGlyXY 
+            HGMD_other 
+            DamagingMissense 
+            BenignMissense
+            Other
+            /){
+
+        if ($a eq "$class"){
+            return -1;
+        }elsif ($b eq "$class"){
+            return 1;
+        }
+    }
+    return 0;
+}
+        
+
+
 
 ###########################################################
 sub getClinVarSearchArgs{
@@ -202,6 +317,32 @@ sub getClinVarSearchArgs{
     my %sargs = ( tabix_iterator => $iterator, columns => $clinVarCols ); 
     return %sargs;
 }
+
+###########################################################
+sub readPhenotypeFile{
+    my %pheno = (); #key is variant unique ID, value is anon hash of phenotype info
+    open (my $PHENO, $opts{phenotype_file}) 
+      or die "Can't open phenotype file $opts{phenotype_file}: $!\n";
+    chomp (my $header= <$PHENO>);
+    my $n = 0;
+    my @c = split (",", $header); 
+    my %cols = map { lc($_) => $n++ } @c;
+    if (not exists $cols{sample_id}){
+        die "Could not find required column 'sample_id' in phenotype file!\n";
+    }
+    while ( my $line = <$PHENO> ){
+        chomp $line;
+        my @split = split(",", $line); 
+        foreach my $f (sort keys %cols){
+            next if $f eq 'sample_id';
+            $pheno{$split[ $cols{sample_id} ] } ->{$f} = $split[ $cols{$f} ] ;
+        }
+    }
+    close $PHENO;
+    delete $cols{sample_id}; 
+    return \%pheno, keys %cols;
+}
+
 ###########################################################
 sub readValidationsFile{
     my %val = (); #key is variant unique ID, value is 1 for validated, 2 for did not validate, 0 for not done
@@ -369,13 +510,53 @@ sub assessAndWriteVariant{
     #see if variant overlaps any variants in HGMD file
     my %min= VcfReader::minimizeAlleles(\@split);
     foreach my $al (sort {$a<=>$b} keys %min){
+        if (%af_info_fields){ #check for annotateSnps.pl etc. frequencies
+           my %af_info_values = getAfInfoValues(\@split);
+           next if ( alleleAboveMaf($al - 1, \%af_info_values) );
+        }
         my @hgmd_matches = searchHgmd($min{$al});
         my @clinvar_matches = searchClinVar($min{$al});
         writeToSheet(\@split, $min{$al}, \@hgmd_matches, \@clinvar_matches);
     }
 }
 
+###########################################################
+sub getAfInfoValues{
+    my $l = shift;
+    my %values = ();
+    foreach my $k (keys %af_info_fields){
+        $values{$k} = VcfReader::getVariantInfoField($l, $k);
+    }
+    return %values;
+}
 
+###########################################################
+sub alleleAboveMaf{
+    my $i = shift; #1-based index of alt allele to assess
+    my $af_values = shift; #hash ref of INFO fields to their values
+    foreach my $k (keys %{$af_values}){
+        next if not $af_values->{$k};
+        next if $af_values->{$k} eq '.';
+        my @split = split(",", $af_values->{$k}); 
+        next if $split[$i] eq '.';
+        if ($k eq "AS_G5" or $k eq "AS_G5A"){
+            if ($af <= 0.05 and $split[$i] > 0){
+                return 1;
+            }
+        }elsif ($k eq "AS_COMMON"){
+            if ($af <= 0.01 and $split[$i] > 0){
+                return 1;
+            }
+        }else{#should be a standard allele freq now
+            if ($info_fields{$k}->{Type} eq 'Float' or $k eq 'AS_CAF'){
+                return 1 if $split[$i] >= $af;
+            }else{
+                print STDERR "WARNING: Don't know how to parse INFO field: $k.\n";
+            }
+        }
+    }
+    return 0;
+}
 
 ###########################################################
 sub writeToSheet{
@@ -393,9 +574,11 @@ sub writeToSheet{
         foreach my $k (keys %allele_counts){
             $total_allele_count += $allele_counts{$k}; 
         }
-        if ($allele_counts{$var->{ALT_INDEX}}/$total_allele_count >= $opts{a}){
-            print $FILTER_OUT join("\t", @$l) . "\n" if $opts{f};
-            return;
+        if ($total_allele_count > 0){
+            if ($allele_counts{$var->{ALT_INDEX}}/$total_allele_count >= $opts{a}){
+                print $FILTER_OUT join("\t", @$l) . "\n" if $opts{f};
+                return;
+            }
         }
     }
     my @row = (); #values to write out to excel sheet
@@ -423,7 +606,7 @@ sub writeToSheet{
         foreach my $f (@hgmd_fields){
             push @row, join(",", @{$hgmd{$f}});
         }
-    }elsif($opts{1}){
+    }else{
         foreach my $f (@hgmd_fields){
             push @row, join("-");
         }
@@ -433,9 +616,7 @@ sub writeToSheet{
     my ($clnSig, $clnTraits, $cvarPathognic, $cvarConflicted) 
                          = getClinSig($clinvar_matches, $var);
     push @row, $clnSig, $clnTraits; 
-    if ( ($cvarPathognic and not @$matches ) or $opts{1} ){
-        push @row, $cvarConflicted;
-    }
+    push @row, $cvarConflicted;
     
     #add standard VCF fields from this allele only
     foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
@@ -549,21 +730,11 @@ sub writeToSheet{
     }
 
     push @row, $csq_to_report->{domains};
-    if ($s_name eq "CollagenGlyXY" or $opts{1}){
-        push @row, $csq_to_report->{glyxy_pos};
-        push @row, $csq_to_report->{domain_coords};
-    }
-    
+    push @row, $csq_to_report->{glyxy_pos};
+    push @row, $csq_to_report->{domain_coords};
 
-    if ($s_name eq 'LOF' or $opts{1}){
-        foreach my $lof (qw / lof lof_filter lof_info lof_flags /){
-            push @row, $csq_to_report->{$lof};
-        }
-    }
-    
-    if ($s_name ne 'LOF' or $opts{1}){
-        push @row, $csq_to_report->{polyphen};
-        push @row, $csq_to_report->{sift};
+    foreach my $f (qw / lof lof_filter lof_info lof_flags polyphen sift/){
+        push @row, $csq_to_report->{$f};
     }
 
     push @row, $allele_cadd;
@@ -651,6 +822,16 @@ sub writeToSheet{
                     push @sample_cells, 0;
                 }
             }
+            if (%$phenotypes){
+                #search phenotypes
+                foreach my $ph (@pheno_fields){
+                    if (exists $phenotypes->{$s}){
+                        push @sample_cells, $phenotypes->{$s}->{$ph};
+                    }else{
+                        push @sample_cells, '-';
+                    }
+                }
+            }
             push @split_cells, \@sample_cells;
             my $var_class = $s_name; 
             if ($s_name eq 'HGMD'){
@@ -662,7 +843,7 @@ sub writeToSheet{
             }
             {
                 no warnings 'uninitialized';
-                push @{$sample_vars{$s}->{$var_class}}, join("|", @row, @sample_cells);
+                push @{$sample_vars{$s}->{$var_class}}, [$allele_cadd, @sample_cells, $var_class, @row, ];
             }
         }
     }
@@ -671,8 +852,8 @@ sub writeToSheet{
         $variant_counts{$category}++;
         if ($opts{1}){
             $s_name = 'Variants';
-            unshift @row, $category;
         }
+        unshift @row, $category;
         unshift @row, "$category.$variant_counts{$category}";
         if ($opts{x}){ #do not merge
             foreach my $s (@split_cells){
@@ -909,17 +1090,18 @@ sub setupOutput{
     }else{
         $xl_obj = TextToExcel->new( file=> $opts{o}, name => "HGMD");
         $header_formatting = $xl_obj->createFormat(bold => 1);
-        writeHeader($sheets{HGMD}, $headers{HGMD});
+        writeHeader($sheets{HGMD}, $headers{Variants});
         $sheets{HGMD} = 0;
-        $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{clinvar});
-        $sheets{LOF} = addSheet("LOF", $headers{LOF});
-        $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{glyxy});
-        $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{missense});
-        $sheets{BenignMissense} = addSheet("BenignMissense", $headers{missense});
-        $sheets{Other} = addSheet("Other", $headers{LOF});
+        $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{Variants});
+        $sheets{LOF} = addSheet("LOF", $headers{Variants});
+        $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{Variants});
+        $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{Variants});
+        $sheets{BenignMissense} = addSheet("BenignMissense", $headers{Variants});
+        $sheets{Other} = addSheet("Other", $headers{Variants});
     }
 
     $sheets{SampleSummary} = addSheet("Sample Summary", $headers{sample});
+    $sheets{MostDamaging} = addSheet("MostDamaging", $headers{mostdamaging});
         
     if ($opts{f}){
         open ($FILTER_OUT, ">$opts{f}") or die "Could not create filter output file \"$opts{f}\": $!\n";
@@ -931,7 +1113,7 @@ sub setupOutput{
 sub getHeaders{
     my %h = ();
 
-    @{$h{Variants}} =  ( #header if only outputting single sheet
+    @{$h{Variants}} =  ( #header for all variant sheets
         qw/
             index
             Category
@@ -973,7 +1155,7 @@ sub getHeaders{
             UID
         /
     );
-
+=cut
     @{$h{HGMD}} =  ( 
         qw / 
             index
@@ -1130,6 +1312,7 @@ sub getHeaders{
             GQ
             UID
      /);
+=cut
 
     @{$h{sample}} =  (  
         qw / 
@@ -1144,14 +1327,61 @@ sub getHeaders{
             Other
             /
     );
+    @{$h{mostdamaging}} =  ( #header for all variant sheets
+        qw/
+            Sample
+            GT
+            AD
+            AB
+            GQ
+            UID
+            Category
+            Hgmd_ID
+            Disease
+            variant_class
+            HGMD_Symbol
+            HGVS
+            ClinVarSig
+            ClinVarTrait
+            ClinVarConflicted
+            Chrom
+            Pos
+            Ref
+            Alt
+            ID
+            Qual
+            Filter
+            Symbol
+            Feature
+            Consequence 
+            HGVSc 
+            HGVSp 
+            Domains
+            DomainPosition
+            DomainCoordinates
+            LoF
+            LoF_Filter
+            LoF_info
+            LoF_flags
+            Polyphen
+            SIFT
+            CADD
+        /
+    );
+
+    my $md_spl = 6;#colu no. to add primers or validated columns to mostdamaging sheet
     if ($opts{primer_file}){
-        foreach my $k (keys %h){
-            push @{$h{$k}}, "primers";
-        }
+        push @{$h{Variants}}, "primers";
+        splice (@{$h{mostdamaging}}, $md_spl++, 0, "primers");
     }
     if ($opts{validations_file}){
-        foreach my $k (keys %h){
-            push @{$h{$k}}, "validated?(1=yes,2=no,0=not_done)";
+        push @{$h{Variants}}, "validated?(1=yes,2=no,0=not_done)";
+        splice (@{$h{mostdamaging}}, $md_spl++, 0, "validated?(1=yes,2=no,0=not_done)");
+    }
+    if ($opts{phenotype_file}){
+        foreach my $ph (@pheno_fields){
+            push @{$h{Variants}}, $ph;
+            splice (@{$h{mostdamaging}}, $md_spl++, 0, $ph); 
         }
     }
     return %h;
