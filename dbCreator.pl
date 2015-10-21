@@ -7,6 +7,7 @@ use Getopt::Long;
 use Data::Dumper;
 use Term::ProgressBar;
 use POSIX qw/strftime/;
+use HTTP::Tiny;
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use IdParser;
@@ -19,36 +20,62 @@ GetOptions(
     'l|list=s',
     'i|id=s{,}',#  => \@gene_ids,
     's|species=s',
-    'o|output=s',
+    't|transcripts=s',
+    'u|uniprot_info=s',
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
 
 usage() if $opts{h};
 usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
+#usage("Error: both --transcripts and --uniprot_info output filenames must be provided") if not $opts{t} or not $opts{u};
 $opts{s} = "human" if not $opts{s};
 my $parser = new IdParser();
 my $restQuery = new EnsemblRestQuery();
+my $http = HTTP::Tiny -> new(); 
+
 my %id_mapping = (); #keep track of which genes came from which ID input
 my %genes = (); #key is gene ID, value is hashses of gene info retrieved from Ensembl
 my %transcript_ranks = (); #key is gene, value is hash of transcript IDs to scores (higher being more preferential)
 my %transcript_xref = (); #key is transcript ID, values are hashes of databases and respective IDs
+my %uniprot_info = (); 
+my %enst_to_uniprot = ();
+
 if ($opts{l}){
     push @gene_ids, readList();
 }
 
 die "No gene IDs provided - nothing to do!\n" if not @gene_ids;
-
+=cut
+open (my $TRANSC, ">$opts{t}") or die "Could not open $opts{t} for writing: $!\n";
+open (my $UNIPRO, ">$opts{u}") or die "Could not open $opts{u} for writing: $!\n";
+=cut
 getGenesFromIds();
 if (not %genes){
     die "Nothing to do!\n";
 }
 rankTranscriptsAndCrossRef();
 
-
+=cut
 print Dumper %transcript_ranks;
-
 print Dumper %transcript_xref;
+print Dumper %uniprot_info;
+=cut 
+
+foreach my $ensg (keys %genes){
+    my $symbol = $genes{$ensg}->{display_name};
+    foreach my $t (sort keys 
+            {
+                $transcript_ranks{$ensg}->{$a} <=> 
+                $transcript_ranks{$ensg}->{$b} 
+            } 
+    %{$transcript_ranks{$ensg}}){
+        
+        
+        
+    }
+}
+
 
 #########################################################
 sub rankTranscriptsAndCrossRef{
@@ -74,9 +101,12 @@ sub rankTranscriptsAndCrossRef{
                 
             }
             addXrefs($t->{id}); 
-
-       foreach my $l (@longest_trans){
-            $transcript_ranks{$ensg}->{$l}++;
+        }
+        foreach my $t (@longest_trans){
+            $transcript_ranks{$ensg}->{$t}++;
+        }
+        foreach my $t (@{$genes{$ensg}->{Transcript}}){
+            $transcript_ranks{$ensg}->{$t}++ if exists $enst_to_uniprot{$t};
         }
     }
 }
@@ -95,12 +125,91 @@ sub addXrefs{
                 ) 
             ){
                 #NOTE that Uniprot entries may include partial/isoform matches
-                push @{$transcript_xref{$id}->{$ext->{dbname}}} , $ext->{primary_id};
+                if ($ext->{dbname} eq 'Uniprot/SWISSPROT'){
+                    if (not exists $uniprot_info{$ext->{primary_id}}){
+                        getUniprotData($ext->{primary_id});
+                    }
+                    if (exists $enst_to_uniprot{$id}){
+                        push @{$transcript_xref{$id}->{$ext->{dbname}}} , $ext->{primary_id};
+                    }
+                }else{
+                    push @{$transcript_xref{$id}->{$ext->{dbname}}} , $ext->{primary_id};
+                }
             }
         }
     }
 }
 
+#########################################################
+sub getUniprotData{
+    my $id = shift;
+    my $site = "http://www.uniprot.org/uniprot";
+    my $url = "$site/$id.txt";
+    my $txt = getHttpData($url);
+    die "Failed to retrieve Uniprot info for $id.\n"
+        ."Tried URL: $url\nExiting\n" unless $txt;
+    $url = "$site/$id.gff";
+    my $gff = getHttpData($url);
+    die "Failed to retrieve Uniprot info for $id.\n"
+        ."Tried URL: $url\nExiting\n" unless $gff;
+    # below collects only the transcript that code for
+    # the canonical uniprot isoform.
+    my @t = parseUniprotFlat($txt);
+    if (not @t){
+        die "ERROR: Could not identify Ensembl transcript for canonical isoform of $id!\n";
+    }
+    foreach my $t (@t){
+        $enst_to_uniprot{$t} = $id;
+    }
+    $uniprot_info{$id} = parseUniprotGff($gff);
+}
+
+#########################################################
+sub parseUniprotFlat{
+    my $txt = shift;
+    my @lines = split("\n", $txt);
+    my $canonical; 
+    my @transcripts = ();
+    foreach my $l (@lines){
+        if ($l =~ /^CC\s+IsoId=(\S+);\s+Sequence=Displayed;/){
+            $canonical = $1;
+            next;
+        }
+        if ($canonical){
+            if($l =~ /DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+\. \[$canonical\]/){
+                push @transcripts, $1;
+            }
+        }
+    }
+    return @transcripts;
+}
+#########################################################
+sub parseUniprotGff{
+    my $gff = shift;
+    my @lines = split("\n", $gff);
+    my %features = ();
+    foreach my $l (@lines){
+        next if $l =~ /^#/;
+        chomp $l;
+        my @g = split("\t", $l);
+        my ($f, $start, $end, $details) = @g[2..4,8];
+        next if $f eq 'Chain';
+        if ($details =~ /Note=(.*)[\n\r;]/){
+            $f .= "|$1";
+        }
+        push @{$features{"$start-$end"}}, $f;
+    }
+    return \%features;
+}   
+
+
+#########################################################
+sub getHttpData{
+    my $url = shift;
+    my $response = $http->get($url);
+    return if not $response->{success};
+    return $response->{content};
+}
 #########################################################
 sub getGenesFromIds{
     foreach my $g (@gene_ids){
@@ -184,7 +293,8 @@ sub usage{
     print STDERR "ERROR: $msg\n" if $msg;
     print <<EOT
     
-    usage: $0 [-i gene_list.txt | -s gene_symbol | -g gene_id | -t transcript_id ] [options]
+    usage: $0 -l gene_list.txt -t transcript_output.txt -u uniprot_output.txt 
+           $0 -i gene_symbol/gene_id/transcript_id -t transcript_output.txt -u uniprot_output.txt
 
     Options:
 
@@ -194,8 +304,10 @@ sub usage{
         One or more gene/transcript/protein identifiers to look up. May be used instead or as well as --list file.
     -s, --species
         Species to search (only applies to non-Ensembl identifiers). Default = human.
-    -o, --ouptut FILE
-        Output file. Optional. Default is STDOUT.
+    -t, --transcripts FILE
+        Output file for transcripts, their ranks and cross refs. Required.
+    -u, --uniprot-info FILE
+        Output file for uniprot information for corresponding proteins. Required.
     -?, -h, --help
         Show this help message.
 
