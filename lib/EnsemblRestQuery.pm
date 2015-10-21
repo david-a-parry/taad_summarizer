@@ -69,22 +69,22 @@ sub new {
 ##################################################
 
 sub AUTOLOAD{
-        my ($self, $val) = @_;
-        no strict 'refs';
-        if ($AUTOLOAD =~ /.*::get(_\w+)/ and $self -> _accessible($1, "read")){
-                my $attr = $1;
-                croak "No such attribute \"$attr\"" unless exists $self->{$attr};
-                *{$AUTOLOAD} = sub { return $_[0] -> {$attr} };
-                return $self->{$attr};
-        }elsif ($AUTOLOAD =~ /.*::set(_\w+)/ and $self -> _accessible($1, "write")){
-                my $attr = $1;
-                croak "No such attribute \"$attr\"" unless exists $self->{$attr};
-                *{$AUTOLOAD} = sub { $_[0] -> {$attr} = $_[1]; return ; };
-                $self -> {$attr} = $val;
-                return
-        }else{
-                croak "Method name \"$AUTOLOAD\" not available";
-        }
+    my ($self, $val) = @_;
+    no strict 'refs';
+    if ($AUTOLOAD =~ /.*::get(_\w+)/ and $self -> _accessible($1, "read")){
+        my $attr = $1;
+        croak "No such attribute \"$attr\"" unless exists $self->{$attr};
+        *{$AUTOLOAD} = sub { return $_[0] -> {$attr} };
+        return $self->{$attr};
+    }elsif ($AUTOLOAD =~ /.*::set(_\w+)/ and $self -> _accessible($1, "write")){
+        my $attr = $1;
+        croak "No such attribute \"$attr\"" unless exists $self->{$attr};
+        *{$AUTOLOAD} = sub { $_[0] -> {$attr} = $_[1]; return ; };
+        $self -> {$attr} = $val;
+        return
+    }else{
+        croak "Method name \"$AUTOLOAD\" not available";
+    }
 }
 
 
@@ -195,4 +195,13 @@ sub getXrefs{
 }
 
 ##################################################
+sub useGRCh37Server{
+    my $self = shift;
+_   $self->{_server} = $self->{_grch37_server};
+}
 
+##################################################
+sub useDefaultServer{
+    my $self = shift;
+_   $self->{_server} = $self->{_default_server};
+}
