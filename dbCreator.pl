@@ -3,6 +3,7 @@
 
 use strict;
 use warnings;
+use POSIX qw/strftime/;
 use Getopt::Long;
 use Data::Dumper;
 use Term::ProgressBar;
@@ -21,14 +22,14 @@ GetOptions(
     'i|id=s{,}',#  => \@gene_ids,
     's|species=s',
     't|transcripts=s',
-    'u|uniprot_info=s',
+    'u|uniprot-info=s',
+    'c|cdd-features=s',
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
 
 usage() if $opts{h};
 usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
-usage("Error: both --transcripts and --uniprot_info output filenames must be provided") if not $opts{t} or not $opts{u};
 $opts{s} = "human" if not $opts{s};
 my $parser = new IdParser();
 my $restQuery = new EnsemblRestQuery();
@@ -39,6 +40,7 @@ my %genes = (); #key is gene ID, value is hashses of gene info retrieved from En
 my %transcript_ranks = (); #key is gene, value is hash of transcript IDs to scores (higher being more preferential)
 my %transcript_xref = (); #key is transcript ID, values are hashes of databases and respective IDs
 my %uniprot_info = (); 
+my %uniprot_to_genename = ();
 my %enst_to_uniprot = ();
 
 if ($opts{l}){
@@ -46,8 +48,13 @@ if ($opts{l}){
 }
 
 die "No gene IDs provided - nothing to do!\n" if not @gene_ids;
-open (my $TRANSC, ">$opts{t}") or die "Could not open $opts{t} for writing: $!\n";
-open (my $UNIPRO, ">$opts{u}") or die "Could not open $opts{u} for writing: $!\n";
+my $TRANSC = \*STDOUT; 
+if ($opts{t}){
+    open ($TRANSC, ">$opts{t}") or die "Could not open $opts{t} for writing: $!\n";
+}
+open (my $UNIPRO, ">$opts{u}") or die "Could not open $opts{u} for writing: $!\n" if $opts{u};
+open (my $CDD,    ">$opts{c}") or die "Could not open $opts{c} for writing: $!\n" if $opts{c};
+
 getGenesFromIds();
 if (not %genes){
     die "Nothing to do!\n";
@@ -55,16 +62,132 @@ if (not %genes){
 rankTranscriptsAndCrossRef();
 
 printTranscriptInfo();
-close $TRANSC;
+close $TRANSC if $opts{t} and $TRANSC;
 
-printUniprotInfo();
-close $UNIPRO;
+printUniprotInfo() if $opts{u};
+close $UNIPRO if $UNIPRO;
+
+retrieveAndPrintCddInfo() if $opts{c};
+close $CDD if $CDD;
+
+#########################################################
+sub parseCddResult{
+    my $data = shift;
+    my @lines = split("\n", $data);
+    foreach my $l (@lines){
+        next if $l =~ /^#/;
+        chomp $l;
+        next if not $l;
+        next if $l =~ /^Query/;
+        my @s = split("\t", $l); 
+        if ($s[0] =~ /Q\#\d+ - (\S+)/){
+            my $u = $1;
+            my $name = $uniprot_to_genename{$u};
+            print $CDD join("\t", 
+              (
+                $name, 
+                $u,
+                $s[2],
+                $s[3],
+              ) 
+            ) . "\n";
+        }else{
+            die "Could not parse CDD result:\n$l\n";
+        }
+    }
+}
+
+#########################################################
+sub retrieveAndPrintCddInfo{
+    my $result = retrieveCddFeatures([keys %uniprot_info]);
+    #print $result;#DEBUG
+    my $cdd_data = parseCddResult($result);
+    print $CDD $cdd_data;
+}
+
+
+#########################################################
+sub retrieveCddFeatures{
+    my $queries = shift; 
+    my $url = "http://www.ncbi.nlm.nih.gov/Structure/bwrpsb/bwrpsb.cgi";
+    my %opts = (
+      evalue   => 0.001,
+      tdata    => 'feats',
+      queries  => $queries
+                    
+    );
+    my $rid;
+    my $response = $http->post_form(
+        $url,
+        \%opts,
+    );
+    die "Error: ", $response->{status}
+    unless $response->{success};
+
+    if($response->{content} =~ /^#cdsid\s+([a-zA-Z0-9-]+)/m) {
+        $rid =$1;
+        informUser( "Search with Request-ID $rid started.\n");
+    }else{
+        die "Submitting the search failed,\n can't make sense of response: $response->content\n";
+    }
+ 
+    # checking for completion, wait 2 seconds between checks
+
+    my $done = 0;
+    my $status = -1;
+    while ($done == 0) {
+        sleep(2);
+        $response = $http->post_form(
+            $url,
+            [
+              'tdata' => "feats",
+              'cdsid' => $rid
+            ],
+        );
+        die "Error: ", $response->{status}
+          unless $response->{success};
+
+        if ($response->{content} =~ /^#status\s+([\d])/m) {
+            $status = $1;
+            if($status == 0) {
+                $done = 1;
+                informUser("CDD search has completed, retrieving results ..\n");
+            }elsif($status == 3) {
+                my $time = strftime( "%H:%M:%S", localtime );
+                informUser("[$time] CDD search still running...\n");
+            }elsif($status == 1) {
+                die "Invalid request ID\n";
+            }elsif($status == 2) {
+                die "Invalid input - missing query information or search ID\n";
+            }elsif($status == 4) {
+                die "Queue Manager Service error\n";
+            }elsif($status == 5) {
+                die "Data corrupted or no longer available\n";
+            }
+        }else{
+            die "Checking search status failed,\ncan't make sense of response: $response->{content}\n";
+        }
+    }
+    # retrieve and display results
+    $response = $http->post_form(
+        $url,
+        [
+            'cdsid'  => $rid
+        ],
+    );
+    die "Error: ", $response->{status}
+      unless $response->{success};
+
+    return $response->{content};
+}
+
 
 #########################################################
 sub printUniprotInfo{
     informUser("Writing Uniprot info to $opts{u}...\n");
     print $UNIPRO '#' . join("\t", 
                 qw / 
+                    GeneName
                     UniprotId
                     Start
                     End
@@ -72,6 +195,7 @@ sub printUniprotInfo{
                     Note
                     /) . "\n";
     foreach my $id (sort keys %uniprot_info){
+        my $name = $uniprot_to_genename{$id};
         foreach my $k ( sort by_unipro_coords keys %{$uniprot_info{$id}}){
             my ($start, $end) = split('-', $k);
             foreach my $f (@{$uniprot_info{$id}->{$k}}){
@@ -79,6 +203,7 @@ sub printUniprotInfo{
                 $note ||= '.';
                 print $UNIPRO join("\t", 
                     (
+                        $name,
                         $id,
                         $start,
                         $end,
@@ -243,7 +368,7 @@ sub getUniprotData{
         ."Tried URL: $url\nExiting\n" unless $gff;
     # below collects only the transcript that code for
     # the canonical uniprot isoform.
-    my @t = parseUniprotFlat($txt);
+    my ($name, @t)  = parseUniprotFlat($txt);
     if (not @t){
         die "ERROR: Could not identify Ensembl transcript for canonical isoform of $id!\n";
     }
@@ -251,6 +376,7 @@ sub getUniprotData{
         $enst_to_uniprot{$t} = $id;
     }
     $uniprot_info{$id} = parseUniprotGff($gff);
+    $uniprot_to_genename{$id} = $name;
 }
 
 #########################################################
@@ -258,8 +384,13 @@ sub parseUniprotFlat{
     my $txt = shift;
     my @lines = split("\n", $txt);
     my $canonical; 
+    my $name = '';
     my @transcripts = ();
     foreach my $l (@lines){
+        if ($l =~ /^GN\s+Name=(\S+);/){
+            $name = $1;
+            next;
+        }
         if ($l =~ /^CC\s+IsoId=(\S+);\s+Sequence=Displayed;/){
             $canonical = $1;
             next;
@@ -274,7 +405,7 @@ sub parseUniprotFlat{
             }
         }
     }
-    return @transcripts;
+    return ($name, @transcripts);
 }
 #########################################################
 sub parseUniprotGff{
@@ -409,9 +540,11 @@ sub usage{
     -s, --species
         Species to search (only applies to non-Ensembl identifiers). Default = human.
     -t, --transcripts FILE
-        Output file for transcripts, their ranks and cross refs. Required.
+        Output file for transcripts, their ranks and cross refs. Will print to STDOUT if not provided.
     -u, --uniprot-info FILE
-        Output file for uniprot information for corresponding proteins. Required.
+        Output file for uniprot information for corresponding proteins. Optional.
+    -c, --cdd-features FILE
+        Output file for Conserved Domain Database feature residue information for corresponding proteins. Optional.
     -?, -h, --help
         Show this help message.
 
