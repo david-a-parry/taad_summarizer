@@ -92,7 +92,7 @@ sub parseCddResult{
               ) 
             ) . "\n";
         }else{
-            die "Could not parse CDD result:\n$l\n";
+            informUser("WARNING: Could not parse CDD result:\n$l\n");
         }
     }
 }
