@@ -822,7 +822,7 @@ sub writeToSheet{
                     push @sample_cells, 0;
                 }
             }
-            if (%$phenotypes){
+            if ($opts{phenotype_file}){
                 #search phenotypes
                 foreach my $ph (@pheno_fields){
                     if (exists $phenotypes->{$s}){
