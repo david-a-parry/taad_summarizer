@@ -120,7 +120,9 @@ sub printTranscriptInfo{
         foreach my $t (sort 
         {
             $transcript_ranks{$ensg}->{$b} <=> 
-            $transcript_ranks{$ensg}->{$a} 
+            $transcript_ranks{$ensg}->{$a} ||
+            exists $enst_to_uniprot{$b} <=> 
+            exists $enst_to_uniprot{$a}  
         } 
         keys %{$transcript_ranks{$ensg}} ){
             my $symbol = $genes{$ensg}->{display_name};
@@ -263,7 +265,11 @@ sub parseUniprotFlat{
             next;
         }
         if ($canonical){
-            if($l =~ /DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+\. \[$canonical\]/){
+            if($l =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+\. \[$canonical\]/){
+                push @transcripts, $1;
+            }
+        }elsif($l =~ /^DR\s/){#if only one isoform there won't be IsoId's
+            if($l =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+/){
                 push @transcripts, $1;
             }
         }
