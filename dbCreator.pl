@@ -28,7 +28,7 @@ GetOptions(
 
 usage() if $opts{h};
 usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
-#usage("Error: both --transcripts and --uniprot_info output filenames must be provided") if not $opts{t} or not $opts{u};
+usage("Error: both --transcripts and --uniprot_info output filenames must be provided") if not $opts{t} or not $opts{u};
 $opts{s} = "human" if not $opts{s};
 my $parser = new IdParser();
 my $restQuery = new EnsemblRestQuery();
@@ -46,42 +46,123 @@ if ($opts{l}){
 }
 
 die "No gene IDs provided - nothing to do!\n" if not @gene_ids;
-=cut
 open (my $TRANSC, ">$opts{t}") or die "Could not open $opts{t} for writing: $!\n";
 open (my $UNIPRO, ">$opts{u}") or die "Could not open $opts{u} for writing: $!\n";
-=cut
 getGenesFromIds();
 if (not %genes){
     die "Nothing to do!\n";
 }
 rankTranscriptsAndCrossRef();
 
-=cut
-print Dumper %transcript_ranks;
-print Dumper %transcript_xref;
-print Dumper %uniprot_info;
-=cut 
+printTranscriptInfo();
+close $TRANSC;
 
-foreach my $ensg (keys %genes){
-    my $symbol = $genes{$ensg}->{display_name};
-    foreach my $t (sort keys 
-            {
-                $transcript_ranks{$ensg}->{$a} <=> 
-                $transcript_ranks{$ensg}->{$b} 
-            } 
-    %{$transcript_ranks{$ensg}}){
-        
-        
-        
+printUniprotInfo();
+close $UNIPRO;
+
+#########################################################
+sub printUniprotInfo{
+    informUser("Writing Uniprot info to $opts{u}...\n");
+    print $UNIPRO '#' . join("\t", 
+                qw / 
+                    UniprotId
+                    Start
+                    End
+                    Feature
+                    Note
+                    /) . "\n";
+    foreach my $id (sort keys %uniprot_info){
+        foreach my $k ( sort by_unipro_coords keys %{$uniprot_info{$id}}){
+            my ($start, $end) = split('-', $k);
+            foreach my $f (@{$uniprot_info{$id}->{$k}}){
+                my ($feature, $note) = split(/\|/, $f );
+                $note ||= '.';
+                print $UNIPRO join("\t", 
+                    (
+                        $id,
+                        $start,
+                        $end,
+                        $feature,
+                        $note,
+                    ) 
+                ) . "\n";
+            }
+        }
     }
 }
 
+#########################################################
+sub by_unipro_coords{
+    my @asplit = split('-', $a);
+    my @bsplit = split('-', $b);
+    if (my $diff = $asplit[0] - $bsplit[0]){
+        return $diff;
+    }
+    return $asplit[1] - $bsplit[1];
+}
 
+#########################################################
+sub printTranscriptInfo{
+    informUser("Writing transcript info to $opts{t}...\n");
+    print $TRANSC '#' . join("\t", 
+                qw /
+                    Symbol
+                    EnsemblGeneID
+                    EnsemblTranscriptID
+                    EnsemblProteinID
+                    RefSeq_mRNA
+                    CCDS
+                    Uniprot
+                    TranscriptScore
+                /) . "\n";
+
+    foreach my $ensg (keys %genes){
+        foreach my $t (sort 
+        {
+            $transcript_ranks{$ensg}->{$b} <=> 
+            $transcript_ranks{$ensg}->{$a} 
+        } 
+        keys %{$transcript_ranks{$ensg}} ){
+            my $symbol = $genes{$ensg}->{display_name};
+            my $score = $transcript_ranks{$ensg}->{$t};
+            my $ensp = ".";
+            my $refseq = ".";
+            my $ccds = ".";
+            my $uniprot = ".";
+            if (exists $transcript_xref{$t}->{Translation}){
+                $ensp = $transcript_xref{$t}->{Translation};
+            }
+            if (exists $transcript_xref{$t}->{RefSeq_mRNA}){
+                $refseq = join("/", @{ $transcript_xref{$t}->{RefSeq_mRNA} } );
+            } 
+            if (exists $transcript_xref{$t}->{CCDS}){
+                $ccds = join("/", @{ $transcript_xref{$t}->{CCDS} } );
+            } 
+            if (exists $enst_to_uniprot{$t}){
+                $uniprot =  $enst_to_uniprot{$t};
+            }
+            
+            print $TRANSC join("\t", 
+                (
+                 $symbol, 
+                 $ensg,
+                 $t, 
+                 $ensp,
+                 $refseq,
+                 $ccds,
+                 $uniprot,
+                 $score,
+                ) 
+            ) . "\n";
+                 
+        }
+    }
+}
 #########################################################
 sub rankTranscriptsAndCrossRef{
      foreach my $ensg (keys %genes){
         if (not $genes{$ensg}->{Transcript}){
-            print STDERR "WARNING: No transcripts identified for \"$ensg}}->{id}\"/\"" 
+            print STDERR "WARNING: No transcripts identified for \"$ensg\"/\"" 
                 . $genes{$ensg}->{display_name} . "\"\n";
             next;
         }
@@ -91,6 +172,7 @@ sub rankTranscriptsAndCrossRef{
             $transcript_ranks{$ensg}->{$t->{id}} = 0;
             $transcript_ranks{$ensg}->{$t->{id}}++ if $t->{is_canonical};
             if ($t->{Translation}){
+                $transcript_xref{$t->{id}}->{Translation} = $t->{Translation}->{id};
                 $transcript_ranks{$ensg}->{$t->{id}}++ ;
                 if ($t->{Translation}->{length} > $longest){
                     @longest_trans = ($t->{id}); 
@@ -102,11 +184,13 @@ sub rankTranscriptsAndCrossRef{
             }
             addXrefs($t->{id}); 
         }
-        foreach my $t (@longest_trans){
-            $transcript_ranks{$ensg}->{$t}++;
+        foreach my $id (@longest_trans){
+            $transcript_ranks{$ensg}->{$id}++;
         }
         foreach my $t (@{$genes{$ensg}->{Transcript}}){
-            $transcript_ranks{$ensg}->{$t}++ if exists $enst_to_uniprot{$t};
+            $transcript_ranks{$ensg}->{$t->{id}} += 2 if exists $enst_to_uniprot{$t->{id}};
+            $transcript_ranks{$ensg}->{$t->{id}}++ if exists $transcript_xref{$t->{id}}->{RefSeq_mRNA};
+            $transcript_ranks{$ensg}->{$t->{id}}++ if exists $transcript_xref{$t->{id}}->{CCDS};
         }
     }
 }
@@ -114,6 +198,7 @@ sub rankTranscriptsAndCrossRef{
 #########################################################
 sub addXrefs{
     my $id = shift;
+    informUser( "Retrieving external IDs for transcript $id...\n");
     my $external = $restQuery->getXrefs(id => $id, all_levels => 1);
     if (ref $external eq 'ARRAY'){
         foreach my $ext (@$external){
@@ -143,12 +228,14 @@ sub addXrefs{
 #########################################################
 sub getUniprotData{
     my $id = shift;
+    informUser( "Retrieving Uniprot text data for $id...\n");
     my $site = "http://www.uniprot.org/uniprot";
     my $url = "$site/$id.txt";
     my $txt = getHttpData($url);
     die "Failed to retrieve Uniprot info for $id.\n"
         ."Tried URL: $url\nExiting\n" unless $txt;
     $url = "$site/$id.gff";
+    informUser( "Retrieving Uniprot GFF data for $id...\n");
     my $gff = getHttpData($url);
     die "Failed to retrieve Uniprot info for $id.\n"
         ."Tried URL: $url\nExiting\n" unless $gff;
@@ -194,6 +281,7 @@ sub parseUniprotGff{
         my @g = split("\t", $l);
         my ($f, $start, $end, $details) = @g[2..4,8];
         next if $f eq 'Chain';
+        next if $f eq 'Alternative sequence';
         if ($details =~ /Note=(.*)[\n\r;]/){
             $f .= "|$1";
         }
@@ -215,7 +303,7 @@ sub getGenesFromIds{
     foreach my $g (@gene_ids){
         $parser->parseId($g); 
         if (not $opts{q}){
-            print STDERR "Interpretting ID \"$g\" as of type \"" . $parser->get_identifierType() . "\"...\n";
+            informUser( "Interpretting ID \"$g\" as of type \"" . $parser->get_identifierType() . "\"...\n");
         }
         my $gene_hash; 
         if ($parser->get_isEnsemblId()){
@@ -227,6 +315,7 @@ sub getGenesFromIds{
                 $gene_hash = $restQuery->lookUpEnsId($g, 1);
             }
         }elsif($parser->get_isTranscript()  or $parser->get_isProtein() ) {
+            informUser("Identifying Ensembl gene via transcript cross-reference...\n");
             my $transcript = $restQuery->getTranscriptViaXreg($g, $opts{s});
             if ($transcript){
                 if (exists $transcript->{id}){
@@ -234,6 +323,7 @@ sub getGenesFromIds{
                 }
             }
         }else{
+            informUser("Identifying Ensembl gene via gene cross-reference...\n");
             my $gene = $restQuery->getGeneViaXreg($g, $opts{s});
             if (ref $gene eq 'ARRAY'){
                 if ($gene->[0]->{id}){
@@ -241,7 +331,6 @@ sub getGenesFromIds{
                 }
             }
         }
-        print Dumper $gene_hash;#DEBUG
         if (not $gene_hash){
             print STDERR "WARNING: Could not identify gene for ID \"$g\"\n";
         }else{
@@ -258,11 +347,13 @@ sub getGenesFromIds{
 
 #########################################################
 sub geneFromEnst{
+    informUser("Identifying parent gene from Ensembl transcript...\n");
     my $id = shift;
     return $restQuery->getParent($id, 1);
 }
 #########################################################
 sub geneFromEnsp{
+    informUser("Identifying parent gene from Ensembl protein...\n");
     my $id = shift;
     my $par = $restQuery->getParent($id);
     if ($par){
@@ -286,6 +377,13 @@ sub readList{
     return @ids;
 }
 
+#########################################################
+sub informUser{
+    return if $opts{q};
+    my $msg = shift;
+    print STDERR $msg;
+}
+        
 
 #########################################################
 sub usage{
