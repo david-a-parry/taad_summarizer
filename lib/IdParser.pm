@@ -129,7 +129,7 @@ sub parseId {
         $self->{_isEnsemblId} = 0;
         $self->{_isProtein} = 1;
         $self->{_identifierType} = "Uniprot ID";
-    }elsif ($id =~ /\d+/){
+    }elsif ($id =~ /^\d+$/){
         $self->{_isTranscript} = 0;
         $self->{_isEnsemblId} = 0;
         $self->{_isProtein} = 0;
