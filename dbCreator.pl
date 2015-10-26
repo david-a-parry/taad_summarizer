@@ -71,7 +71,40 @@ retrieveAndPrintCddInfo() if $opts{c};
 close $CDD if $CDD;
 
 #########################################################
-sub parseCddResult{
+sub parseCddFeats{
+    my $data = shift;
+    my @lines = split("\n", $data);
+    foreach my $l (@lines){
+        next if $l =~ /^#/;
+        chomp $l;
+        next if not $l;
+        next if $l =~ /^Query/;
+        my @s = split("\t", $l); 
+        if ($s[0] =~ /Q\#\d+ - (\S+)/){
+            my $u = $1;
+            my $name = $uniprot_to_genename{$u};
+            my @coords = sort { $a <=> $b } 
+                         map { s/^[A-Z]+//; $_ } 
+                         split(",", $s[3]);
+            print $CDD join("\t", 
+              (
+                $name, 
+                $u,
+                "Feature",
+                $s[2],
+                $s[3],
+                $coords[0],
+                $coords[-1],
+              ) 
+            ) . "\n";
+        }else{
+            informUser("WARNING: Could not parse CDD result:\n$l\n");
+        }
+    }
+}
+
+#########################################################
+sub parseCddHits{
     my $data = shift;
     my @lines = split("\n", $data);
     foreach my $l (@lines){
@@ -87,8 +120,11 @@ sub parseCddResult{
               (
                 $name, 
                 $u,
-                $s[2],
+                "Hit",
+                $s[8],
+                "-",
                 $s[3],
+                $s[4],
               ) 
             ) . "\n";
         }else{
@@ -99,9 +135,23 @@ sub parseCddResult{
 
 #########################################################
 sub retrieveAndPrintCddInfo{
-    my $result = retrieveCddFeatures([keys %uniprot_info]);
+    my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
+    my $hits  = retrieveCddFeatures([keys %uniprot_info], 'hits');
     #print $result;#DEBUG
-    my $cdd_data = parseCddResult($result);
+    print $CDD "#" . join("\t", 
+            qw /
+                GeneName
+                Uniprot
+                ResultType
+                Feature
+                Residues
+                Start
+                End
+            /
+        ) . "\n";
+    my $cdd_data = parseCddFeats($feats);
+    print $CDD $cdd_data;
+    $cdd_data = parseCddHits($hits);
     print $CDD $cdd_data;
 }
 
@@ -109,10 +159,12 @@ sub retrieveAndPrintCddInfo{
 #########################################################
 sub retrieveCddFeatures{
     my $queries = shift; 
+    my $tdata = shift;
+    $tdata ||= 'feats';
     my $url = "http://www.ncbi.nlm.nih.gov/Structure/bwrpsb/bwrpsb.cgi";
     my %opts = (
       evalue   => 0.001,
-      tdata    => 'feats',
+      tdata    => $tdata,
       queries  => $queries
                     
     );
@@ -126,7 +178,7 @@ sub retrieveCddFeatures{
 
     if($response->{content} =~ /^#cdsid\s+([a-zA-Z0-9-]+)/m) {
         $rid =$1;
-        informUser( "Search with Request-ID $rid started.\n");
+        informUser( "CDD  '$tdata' search with Request-ID $rid started.\n");
     }else{
         die "Submitting the search failed,\n can't make sense of response: $response->content\n";
     }
@@ -419,8 +471,12 @@ sub parseUniprotGff{
         my ($f, $start, $end, $details) = @g[2..4,8];
         next if $f eq 'Chain';
         next if $f eq 'Alternative sequence';
-        if ($details =~ /Note=(.*)[\n\r;]/){
-            $f .= "|$1";
+        next if $f eq 'Sequence conflict';
+        my @dets = split(";", $details);
+        foreach my $d (@dets){
+            if ($d =~ /Note=(.+)/){
+                $f .= "|$1";
+            }
         }
         push @{$features{"$start-$end"}}, $f;
     }
