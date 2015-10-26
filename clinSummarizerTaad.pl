@@ -500,6 +500,7 @@ sub getClinVarColumns{
             die "Required column ($c) not found in ClinVar file ($cv) header.\n";
         }
     }
+    close $CVAR;
     return %columns;
 }
 ###########################################################
@@ -1747,11 +1748,23 @@ sub setTranscriptsRanks{
              $enst_to_uniprot{$transcript} = $uniprot;
         }
     }
+    close $TR;
 }
 
 ###########################################################
 sub readUniprotFile{
-    ...
+    return if ( not $opts{u} );
+    open (my $UNI, $opts{u}) or die "Can't open --uniprot file ($opts{u}) for reading: $!\n";
+    my $header = <$UNI>;
+    $header =~ s/^#+//;
+    my %tr_columns = getColumns($header);
+    foreach my $req ( qw / UniprotId Start End Feature Note / ){
+        if (not exists  $tr_columns{$req}){
+            ##TODO
+        }
+    }
+    ##TODO
+    close $UNI;
 }
 
 ###########################################################
