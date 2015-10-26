@@ -42,7 +42,10 @@ GetOptions(
     'g|gq=f',            #min GQ quality for calls
     's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
     'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
-    'validations_file=s', #read a tab delimited file of validationss and coordinates to assign validation status
+    't|transcripts=s',  #optional tsv list of transcript IDs plus links to uniprot IDs in order of priority
+    'rules=s',        #optional tsv file of mutation rules
+    'u|uniprot_data=s', #optional uniprot data file
+    'c|cdd_data=s',     #optional CDD data file
     'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
     'p|progress',       #show a progress bar?
     'x|do_not_merge',    #do not merge cells
@@ -59,7 +62,7 @@ pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m}
 
 #create our http client for ensembl REST queries 
 my $http = HTTP::Tiny->new();
-my $server = $opts{r} ? $opts{r} : 'http://grch37.rest.ensembl.org';
+my $server = $opts{rest_server} ? $opts{rest_server} : 'http://grch37.rest.ensembl.org';
 my $min_gq = defined $opts{g} ? 0 : $opts{g}; #default min GQ of 0
 my $af = defined $opts{y} ? 0.001 : $opts{y}; #default of 0.1 % cutoff in external databases
 
@@ -113,7 +116,22 @@ setConsequenceRanks();
 #open and check transcripts list
 
 my %transcript_ranks = ();
+my %enst_to_uniprot = ();
 setTranscriptsRanks();
+
+#read uniprot data
+my %uniprot_features = ();
+readUniprotFile();
+
+#read CDD data
+my %cdd_features = ();
+readCddFile();
+
+#check rules
+
+my %rules = ();
+setMutationRules();
+
 
 #setup our hash of headers
 
@@ -1362,6 +1380,7 @@ sub getHeaders{
     );
 
     my $md_spl = 6;#colu no. to add primers or validated columns to mostdamaging sheet
+    my $v_spl = 9; #column no. to add uniprot/cdd domain info to variant sheets
     if ($opts{primer_file}){
         push @{$h{Variants}}, "primers";
         splice (@{$h{mostdamaging}}, $md_spl++, 0, "primers");
@@ -1707,7 +1726,7 @@ sub setTranscriptsRanks{
     my $header = <$TR>;
     $header =~ s/^#+//;
     my %tr_columns = getColumns($header);
-    foreach my $req ( qw / symbol transcript / ){
+    foreach my $req ( qw / symbol transcript uniprot / ){
         if (not exists  $tr_columns{$req}){
             die "Could not find required column '$req' in header of --transcripts file $opts{t}. Found the following columns:\n" . join("\n", sort {$a <=> $b} keys %tr_columns) . "\n";
         }
@@ -1719,7 +1738,27 @@ sub setTranscriptsRanks{
         my $symbol = uc($split[ $tr_columns{symbol} ]);
         my $transcript = uc ($split[ $tr_columns{transcript} ]); 
         push @{$transcript_ranks{$symbol} }, $transcript; 
+        my $uniprot = uc($split[ $tr_columns{uniprot} ]);
+        if ($uniprot ne '.'){
+             $enst_to_uniprot{$transcript} = $uniprot;
+        }
     }
+}
+
+###########################################################
+sub readUniprotFile{
+    ...
+}
+
+###########################################################
+sub readCddFile{
+    ...
+}
+
+###########################################################
+
+sub setMutationRules{
+    ...
 }
 
 ###########################################################
