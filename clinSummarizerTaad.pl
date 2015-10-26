@@ -324,9 +324,8 @@ sub readPhenotypeFile{
     open (my $PHENO, $opts{phenotype_file}) 
       or die "Can't open phenotype file $opts{phenotype_file}: $!\n";
     chomp (my $header= <$PHENO>);
-    my $n = 0;
-    my @c = split (",", $header); 
-    my %cols = map { lc($_) => $n++ } @c;
+    $header =~ s/^#+//;
+    my %cols = getColumns($header, 1, ',');
     if (not exists $cols{sample_id}){
         die "Could not find required column 'sample_id' in phenotype file!\n";
     }
@@ -348,10 +347,8 @@ sub readValidationsFile{
     my %val = (); #key is variant unique ID, value is 1 for validated, 2 for did not validate, 0 for not done
     open (my $VAL, $opts{validations_file}) 
       or die "Can't open validations file $opts{validations_file}: $!\n";
-    chomp (my $header= <$VAL>);
-    my $n = 0;
-    my @c = split ("\t", $header); 
-    my %cols = map { $_ => $n++ } @c;
+    my $header= <$VAL>;
+    my %cols = getColumns($header);
     my @fields =  qw / UID VALIDATED / ;
     foreach my $f (@fields){
         if (not exists $cols{$f}){
@@ -371,10 +368,8 @@ sub readPrimerFile{
     open (my $PRIMERS, $opts{primer_file}) 
       or die "Can't open primer file $opts{primer_file}: $!\n";
     my @prime = (); #create an array of hash refs with id, chr, start, end, f and r keys
-    chomp (my $header = <$PRIMERS>);
-    my $n = 0;
-    my @c = split ("\t", $header); 
-    my %cols = map { $_ => $n++ } @c;
+    my $header = <$PRIMERS>;
+    my %cols = getColumns($header); 
     my @fields =  qw / ID CHROM START END F R / ;
     foreach my $f (@fields){
         if (not exists $cols{$f}){
@@ -422,8 +417,6 @@ sub compressClinVarTsv{
         die "Could not find bgzip executable - please install bgzip and ensure ".
             "it is in your PATH or compress and index $cv manually.\n";
     }
-    open (my $CVAR, $cv) or die "Can't open $cv for reading header: $!\n";
-    my @header = split("\t", <$CVAR>); 
     my %columns = getClinVarColumns($cv);
     print STDERR "Compressing $cv with bgzip...\n";
     system("bgzip -c $cv > $cv.gz"); 
@@ -472,9 +465,8 @@ sub getClinVarColumns{
     }else{
         open ($CVAR, $cv) or die "Can't open $cv for reading header: $!\n";
     }
-    chomp (my @header = split("\t", <$CVAR>)); 
-    my $n = 0;
-    my %columns = map { lc($_) => $n++} @header;
+    my $header = <$CVAR>;
+    my %columns = getColumns($header, 1);
     for my $c ( qw / 
                     chrom
                     pos
@@ -1713,12 +1705,11 @@ sub setTranscriptsRanks{
     return if ( not $opts{t} );
     open (my $TR, $opts{t}) or die "Can't open --transcripts file ($opts{t}) for reading: $!\n";
     my $header = <$TR>;
-    chomp (my @head = split("\t", $header)); 
-    my $n = 0;
-    my %tr_columns = map { lc($_) => $n++ } map { (my $trim = $_) =~ s/^#+//; $trim } @head;
+    $header =~ s/^#+//;
+    my %tr_columns = getColumns($header);
     foreach my $req ( qw / symbol transcript / ){
         if (not exists  $tr_columns{$req}){
-            die "Could not find required column '$req' in header of --transcripts file $opts{t}. Found the following columns:\n" . join("\n", @head) . "\n";
+            die "Could not find required column '$req' in header of --transcripts file $opts{t}. Found the following columns:\n" . join("\n", sort {$a <=> $b} keys %tr_columns) . "\n";
         }
     }
 
@@ -1729,6 +1720,22 @@ sub setTranscriptsRanks{
         my $transcript = uc ($split[ $tr_columns{transcript} ]); 
         push @{$transcript_ranks{$symbol} }, $transcript; 
     }
+}
+
+###########################################################
+sub getColumns{
+    #returns a hash of column names to 0-based column number
+    my ($header, $to_lower, $delimiter) = @_;
+    $delimiter ||= "\t"; 
+    chomp (my @head = split($delimiter, $header)); 
+    my $n = 0;
+    my %columns = (); 
+    if ($to_lower){
+        %columns = map { lc($_) => $n++ } @head;
+    }else{
+        %columns = map { $_ => $n++ } @head;
+    }
+    return %columns;
 }
 
 
