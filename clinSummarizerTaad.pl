@@ -1728,7 +1728,11 @@ sub setTranscriptsRanks{
     my %tr_columns = getColumns($header);
     foreach my $req ( qw / symbol transcript uniprot / ){
         if (not exists  $tr_columns{$req}){
-            die "Could not find required column '$req' in header of --transcripts file $opts{t}. Found the following columns:\n" . join("\n", sort {$a <=> $b} keys %tr_columns) . "\n";
+            die "Could not find required column '$req' ".
+                "in header of --transcripts file $opts{t}. ".
+                "Found the following columns:\n" . 
+                join("\n", sort {$a <=> $b} keys %tr_columns) . 
+                "\n";
         }
     }
 
