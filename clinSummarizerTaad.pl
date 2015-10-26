@@ -1731,7 +1731,7 @@ sub setTranscriptsRanks{
             die "Could not find required column '$req' ".
                 "in header of --transcripts file $opts{t}. ".
                 "Found the following columns:\n" . 
-                join("\n", sort {$a <=> $b} keys %tr_columns) . 
+                join("\n", sort { $tr_columns{$a} <=> $tr_columns{$b} } keys %tr_columns) . 
                 "\n";
         }
     }
