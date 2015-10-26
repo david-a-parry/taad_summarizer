@@ -9,6 +9,7 @@ use Data::Dumper;
 use Term::ProgressBar;
 use POSIX qw/strftime/;
 use HTTP::Tiny;
+use URI::Encode qw (uri_decode);
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use IdParser;
@@ -478,6 +479,7 @@ sub parseUniprotGff{
                 $f .= "|$1";
             }
         }
+        $f = uri_decode($f); 
         push @{$features{"$start-$end"}}, $f;
     }
     return \%features;
