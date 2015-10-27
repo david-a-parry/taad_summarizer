@@ -3,6 +3,7 @@
 
 use strict;
 use warnings;
+use DBI;
 use POSIX qw/strftime/;
 use Getopt::Long;
 use Data::Dumper;
@@ -21,17 +22,31 @@ GetOptions(
     \%opts,
     'l|list=s',
     'i|id=s{,}',#  => \@gene_ids,
+    'd|db=s', #sqlite database output
     's|species=s',
-    't|transcripts=s',
-    'u|uniprot-info=s',
-    'c|cdd-features=s',
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
 
 usage() if $opts{h};
 usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
+usage("Error: please specify a filename for your database using the --db option!\n") 
+    if not $opts{d};
 $opts{s} = "human" if not $opts{s};
+
+
+#set up database
+if (-e $opts{d}){
+    die "ERROR: --db file '$opts{d}' already exists - appending to database files is not currently supported!\n";
+}
+my $driver   = "SQLite";
+my $max_commit = 10_000;
+my $dbh = DBI->connect("DBI:$driver:$opts{d}", {RaiseError => 1}) 
+    or die "Could not create sqlite database '$opts{d}': " . DBI->errstr . "\n";
+#$dbh->do("create database $opts{d}") or die "Could not create database '$opts{d}': " . $dbh->errstr . "\n";
+#$dbh->do("use $opts{d}") or die "Could not execute 'use $opts{d}' in sqlite: " . $dbh->errstr . "\n"; 
+
+#set up our query objects
 my $parser = new IdParser();
 my $restQuery = new EnsemblRestQuery();
 my $http = HTTP::Tiny -> new(); 
@@ -49,12 +64,6 @@ if ($opts{l}){
 }
 
 die "No gene IDs provided - nothing to do!\n" if not @gene_ids;
-my $TRANSC = \*STDOUT; 
-if ($opts{t}){
-    open ($TRANSC, ">$opts{t}") or die "Could not open $opts{t} for writing: $!\n";
-}
-open (my $UNIPRO, ">$opts{u}") or die "Could not open $opts{u} for writing: $!\n" if $opts{u};
-open (my $CDD,    ">$opts{c}") or die "Could not open $opts{c} for writing: $!\n" if $opts{c};
 
 getGenesFromIds();
 if (not %genes){
@@ -62,19 +71,43 @@ if (not %genes){
 }
 rankTranscriptsAndCrossRef();
 
-printTranscriptInfo();
-close $TRANSC if $opts{t} and $TRANSC;
+outputTranscriptInfo();
 
-printUniprotInfo() if $opts{u};
-close $UNIPRO if $UNIPRO;
+outputUniprotInfo() ; 
 
-retrieveAndPrintCddInfo() if $opts{c};
-close $CDD if $CDD;
+retrieveAndOutputCddInfo() ; 
+
+$dbh->disconnect(); 
+
+
+#########################################################
+sub createTable{
+    my ($table, $fields, $field_to_prop) = @_;
+    my $create_string = join(", ", map { "$_ $field_to_prop->{$_}" } @$fields);
+    my $stmt = "CREATE TABLE $table ($create_string)";
+    informUser("Creating '$table' table in $opts{d}.\n");
+    $dbh->do($stmt) or die "Error creating '$table' table: " . $dbh->errstr . "\n";
+}
+
+#########################################################
+sub getInsertionQuery{
+    my $table = shift;
+    my $fields = shift;
+    my $field_list = join(", ", @$fields);
+    my $placeholders = join ", ", map {'?'} @$fields;
+    return "INSERT INTO $table ($field_list) VALUES ($placeholders)";
+}
+
 
 #########################################################
 sub parseCddFeats{
     my $data = shift;
+    my $f = shift; 
     my @lines = split("\n", $data);
+    my $insert_query = getInsertionQuery("cdd", $f); 
+    $dbh->do('begin');
+    my $sth= $dbh->prepare( $insert_query );
+    my $n = 0;
     foreach my $l (@lines){
         next if $l =~ /^#/;
         chomp $l;
@@ -87,8 +120,8 @@ sub parseCddFeats{
             my @coords = sort { $a <=> $b } 
                          map { s/^[A-Z]+//; $_ } 
                          split(",", $s[3]);
-            print $CDD join("\t", 
-              (
+            $n += $sth->execute(
+                undef,
                 $name, 
                 $u,
                 "Feature",
@@ -96,18 +129,28 @@ sub parseCddFeats{
                 $s[3],
                 $coords[0],
                 $coords[-1],
-              ) 
-            ) . "\n";
+            ) ;
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
         }else{
             informUser("WARNING: Could not parse CDD result:\n$l\n");
         }
     }
+    $dbh->do('commit') if $n;
 }
 
 #########################################################
 sub parseCddHits{
     my $data = shift;
+    my $f = shift; 
     my @lines = split("\n", $data);
+    my $insert_query = getInsertionQuery("cdd", $f); 
+    $dbh->do('begin');
+    my $sth= $dbh->prepare( $insert_query );
+    my $n = 0;
     foreach my $l (@lines){
         next if $l =~ /^#/;
         chomp $l;
@@ -117,43 +160,57 @@ sub parseCddHits{
         if ($s[0] =~ /Q\#\d+ - (\S+)/){
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
-            print $CDD join("\t", 
-              (
+
+            $n += $sth->execute(
+                undef,
                 $name, 
                 $u,
                 "Hit",
                 $s[8],
-                "-",
+                undef,
                 $s[3],
                 $s[4],
-              ) 
-            ) . "\n";
+            ) ;
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
         }else{
             informUser("WARNING: Could not parse CDD result:\n$l\n");
         }
     }
+    $dbh->do('commit') if $n;
 }
 
 #########################################################
-sub retrieveAndPrintCddInfo{
+sub retrieveAndOutputCddInfo{
     my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
     my $hits  = retrieveCddFeatures([keys %uniprot_info], 'hits');
-    #print $result;#DEBUG
-    print $CDD "#" . join("\t", 
-            qw /
-                GeneName
-                Uniprot
-                ResultType
-                Feature
-                Residues
-                Start
-                End
-            /
-        ) . "\n";
-    my $cdd_data = parseCddFeats($feats);
-    print $CDD $cdd_data;
-    $cdd_data = parseCddHits($hits);
-    print $CDD $cdd_data;
+    my @fields = qw / 
+                 id   
+                 UniprotId   
+                 symbol 
+                 ResultType 
+                 Feature 
+                 Residues 
+                 Start 
+                 End
+                 /; 
+    my %f_to_prop = ( 
+                 id          => "INTEGER primary key AUTOINCREMENT not null",  
+                 UniprotId   => "TEXT not null",  
+                 symbol      => "TEXT",
+                 ResultType  => "TEXT",
+                 Feature     => "TEXT",
+                 Residues    => "TEXT",
+                 Start       => "INT not null",
+                 End       => "INT not null",
+                 );
+    createTable('cdd', \@fields, \%f_to_prop);
+    informUser("Adding data retrieved from CDD to 'cdd' table of $opts{d}.\n");
+    parseCddFeats($feats, \@fields);
+    parseCddHits($hits, \@fields);
 }
 
 
@@ -163,6 +220,7 @@ sub retrieveCddFeatures{
     my $tdata = shift;
     $tdata ||= 'feats';
     my $url = "http://www.ncbi.nlm.nih.gov/Structure/bwrpsb/bwrpsb.cgi";
+    informUser( "Setting up CDD '$tdata' search...\n");
     my %opts = (
       evalue   => 0.001,
       tdata    => $tdata,
@@ -206,8 +264,7 @@ sub retrieveCddFeatures{
                 $done = 1;
                 informUser("CDD search has completed, retrieving results ..\n");
             }elsif($status == 3) {
-                my $time = strftime( "%H:%M:%S", localtime );
-                informUser("[$time] CDD search still running...\n");
+                informUser("CDD search still running...\n");
             }elsif($status == 1) {
                 die "Invalid request ID\n";
             }elsif($status == 2) {
@@ -236,37 +293,58 @@ sub retrieveCddFeatures{
 
 
 #########################################################
-sub printUniprotInfo{
-    informUser("Writing Uniprot info to $opts{u}...\n");
-    print $UNIPRO '#' . join("\t", 
-                qw / 
-                    GeneName
-                    UniprotId
-                    Start
-                    End
-                    Feature
-                    Note
-                    /) . "\n";
+sub outputUniprotInfo{
+    my @fields = qw / 
+                id   
+                GeneName
+                UniprotId
+                Start
+                End
+                Feature
+                Note
+                /; 
+    my %f_to_prop = ( 
+                id          => "INTEGER primary key AUTOINCREMENT not null",  
+                GeneName    => "TEXT",
+                UniprotId   => "TEXT",
+                Start		=> "INT not null",
+                End		    => "INT not null",
+                Feature		=> "TEXT not null",
+                Note		=> "TEXT",
+                 );
+    createTable('uniprot', \@fields, \%f_to_prop);
+    my @lol = ();
+    my $insert_query = getInsertionQuery("uniprot", \@fields); 
+    my $sth = $dbh->prepare( $insert_query );
+    informUser("Adding data retrieved from Uniprot to 'uniprot' table of $opts{d}.\n");
+    $dbh->do('begin');
+    my $n = 0; 
     foreach my $id (sort keys %uniprot_info){
         my $name = $uniprot_to_genename{$id};
         foreach my $k ( sort by_unipro_coords keys %{$uniprot_info{$id}}){
             my ($start, $end) = split('-', $k);
             foreach my $f (@{$uniprot_info{$id}->{$k}}){
                 my ($feature, $note) = split(/\|/, $f );
-                $note ||= '.';
-                print $UNIPRO join("\t", 
+                $n += $sth->execute
                     (
+                        undef,
                         $name,
                         $id,
                         $start,
                         $end,
                         $feature,
                         $note,
-                    ) 
-                ) . "\n";
+                        
+                    );
+                if ($n == $max_commit ){
+                    $dbh->do('commit');
+                    $dbh->do('begin');
+                    $n = 0;
+                }
             }
         }
     }
+    $dbh->do('commit') if $n;
 }
 
 #########################################################
@@ -280,10 +358,9 @@ sub by_unipro_coords{
 }
 
 #########################################################
-sub printTranscriptInfo{
-    informUser("Writing transcript info to $opts{t}...\n");
-    print $TRANSC '#' . join("\t", 
-                qw /
+sub outputTranscriptInfo{
+    my @fields = qw /
+                    id
                     Symbol
                     EnsemblGeneID
                     EnsemblTranscriptID
@@ -292,9 +369,29 @@ sub printTranscriptInfo{
                     CCDS
                     Uniprot
                     TranscriptScore
-                /) . "\n";
-
+                    TranscriptRank	
+                /;
+    my %f_to_prop = ( 
+                id                  => "INTEGER primary key AUTOINCREMENT not null",  
+                Symbol			    => "TEXT",
+                EnsemblGeneID	    => "TEXT not null",
+                EnsemblTranscriptID => "TEXT not null",
+                EnsemblProteinID    => "TEXT",
+                RefSeq_mRNA			=> "TEXT",
+                CCDS			    => "TEXT",
+                Uniprot			    => "TEXT",
+                TranscriptScore		=> "INT not null",
+                TranscriptRank		=> "INT not null",
+                );
+    createTable('transcripts', \@fields, \%f_to_prop);
+    informUser("Adding transcript data retrieved from Ensembl to 'transcripts' table of $opts{d}.\n");
+    my $insert_query = getInsertionQuery("transcripts", \@fields); 
+    my $sth = $dbh->prepare( $insert_query );
+    
+    $dbh->do('begin');
+    my $n = 0;
     foreach my $ensg (keys %genes){
+        my $rank = 0;
         foreach my $t (sort 
         {
             $transcript_ranks{$ensg}->{$b} <=> 
@@ -303,12 +400,13 @@ sub printTranscriptInfo{
             exists $enst_to_uniprot{$a}  
         } 
         keys %{$transcript_ranks{$ensg}} ){
+            $rank++;
             my $symbol = $genes{$ensg}->{display_name};
             my $score = $transcript_ranks{$ensg}->{$t};
-            my $ensp = ".";
-            my $refseq = ".";
-            my $ccds = ".";
-            my $uniprot = ".";
+            my $ensp = undef;
+            my $refseq = undef;
+            my $ccds = undef;
+            my $uniprot = undef;
             if (exists $transcript_xref{$t}->{Translation}){
                 $ensp = $transcript_xref{$t}->{Translation};
             }
@@ -322,8 +420,8 @@ sub printTranscriptInfo{
                 $uniprot =  $enst_to_uniprot{$t};
             }
             
-            print $TRANSC join("\t", 
-                (
+            $n += $sth->execute (
+                 undef,
                  $symbol, 
                  $ensg,
                  $t, 
@@ -332,11 +430,16 @@ sub printTranscriptInfo{
                  $ccds,
                  $uniprot,
                  $score,
-                ) 
-            ) . "\n";
-                 
+                 $rank,
+            ); 
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
         }
     }
+    $dbh->do('commit')if $n;
 }
 #########################################################
 sub rankTranscriptsAndCrossRef{
@@ -575,8 +678,9 @@ sub readList{
 #########################################################
 sub informUser{
     return if $opts{q};
+    my $time = strftime( "%H:%M:%S", localtime );
     my $msg = shift;
-    print STDERR $msg;
+    print STDERR "[$time] $msg";
 }
         
 
@@ -586,8 +690,8 @@ sub usage{
     print STDERR "ERROR: $msg\n" if $msg;
     print <<EOT
     
-    usage: $0 -l gene_list.txt -t transcript_output.txt -u uniprot_output.txt 
-           $0 -i gene_symbol/gene_id/transcript_id -t transcript_output.txt -u uniprot_output.txt
+    usage: $0 -l gene_list.txt -d output.db
+           $0 -i gene_symbol/gene_id/transcript_id --d output.db
 
     Options:
 
@@ -595,14 +699,10 @@ sub usage{
         Input file of gene/transcript/protein IDs one per line. Any whitespace following the first word of each line will be ignored.
     -i, --ids
         One or more gene/transcript/protein identifiers to look up. May be used instead or as well as --list file.
+    -d, --db FILE
+        Output file for database. Required.
     -s, --species
         Species to search (only applies to non-Ensembl identifiers). Default = human.
-    -t, --transcripts FILE
-        Output file for transcripts, their ranks and cross refs. Will print to STDOUT if not provided.
-    -u, --uniprot-info FILE
-        Output file for uniprot information for corresponding proteins. Optional.
-    -c, --cdd-features FILE
-        Output file for Conserved Domain Database feature residue information for corresponding proteins. Optional.
     -?, -h, --help
         Show this help message.
 
