@@ -37,10 +37,11 @@ $opts{s} = "human" if not $opts{s};
 
 #set up database
 if (-e $opts{d}){
-    die "ERROR: --db file '$opts{d}' already exists - appending to database files is not currently supported!\n";
+    informUser("INFO: --db file '$opts{d}' already exists - additional data will be appended to this database file\n");
+    #should really amend this so that appending is possible, not a priority yet though
 }
 my $driver   = "SQLite";
-my $max_commit = 10_000;
+my $max_commit = 1000;
 my $dbh = DBI->connect("DBI:$driver:$opts{d}", {RaiseError => 1}) 
     or die "Could not create sqlite database '$opts{d}': " . DBI->errstr . "\n";
 #$dbh->do("create database $opts{d}") or die "Could not create database '$opts{d}': " . $dbh->errstr . "\n";
@@ -84,8 +85,8 @@ $dbh->disconnect();
 sub createTable{
     my ($table, $fields, $field_to_prop) = @_;
     my $create_string = join(", ", map { "$_ $field_to_prop->{$_}" } @$fields);
-    my $stmt = "CREATE TABLE $table ($create_string)";
-    informUser("Creating '$table' table in $opts{d}.\n");
+    my $stmt = "CREATE TABLE IF NOT EXISTS $table ($create_string)";
+    informUser("Creating/appending to '$table' table in $opts{d}.\n");
     $dbh->do($stmt) or die "Error creating '$table' table: " . $dbh->errstr . "\n";
 }
 
@@ -95,9 +96,34 @@ sub getInsertionQuery{
     my $fields = shift;
     my $field_list = join(", ", @$fields);
     my $placeholders = join ", ", map {'?'} @$fields;
-    return "INSERT INTO $table ($field_list) VALUES ($placeholders)";
+    return "INSERT OR REPLACE INTO $table ($field_list) VALUES ($placeholders)";
 }
 
+
+#########################################################
+sub getSelectQuery{
+    my $table = shift;
+    my $fields = shift;
+    my $field_list = join(", ", @$fields);
+    my $queries = join " and ", map {"$_ == ?"} @$fields;
+    #my $queries = join " and ", map {"($_ == ? or ($_ is null and ? == 1))"} @$fields;
+    return "SELECT $field_list from $table where $queries";
+}
+
+#########################################################
+sub addRow{
+    my ($insth, $selth, $vals) = @_;
+    my @multi_vals = map {($_, defined($_) ? 0 : 1) } @$vals;
+    $selth->execute(@$vals) or die "Could not execute duplicate check query: " 
+   # $selth->execute(@multi_vals) or die "Could not execute duplicate check query: " 
+      . $selth->errstr;
+    if ($selth->fetchrow_arrayref){
+        informUser("Ignoring duplicate entry " . join("|", @$vals) . "\n");
+        return 0;
+    }
+    my $n = $insth->execute(@$vals) or die "Could not insert values: " . $insth->errstr;
+    return $n;
+}
 
 #########################################################
 sub parseCddFeats{
@@ -105,8 +131,10 @@ sub parseCddFeats{
     my $f = shift; 
     my @lines = split("\n", $data);
     my $insert_query = getInsertionQuery("cdd", $f); 
+    my $select_query = getSelectQuery("cdd", $f); 
     $dbh->do('begin');
-    my $sth= $dbh->prepare( $insert_query );
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
     my $n = 0;
     foreach my $l (@lines){
         next if $l =~ /^#/;
@@ -120,8 +148,7 @@ sub parseCddFeats{
             my @coords = sort { $a <=> $b } 
                          map { s/^[A-Z]+//; $_ } 
                          split(",", $s[3]);
-            $n += $sth->execute(
-                undef,
+            my @values = (
                 $name, 
                 $u,
                 "Feature",
@@ -130,6 +157,7 @@ sub parseCddFeats{
                 $coords[0],
                 $coords[-1],
             ) ;
+            $n += addRow($insth, $selth, \@values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -139,7 +167,7 @@ sub parseCddFeats{
             informUser("WARNING: Could not parse CDD result:\n$l\n");
         }
     }
-    $dbh->do('commit') if $n;
+    $dbh->do('commit');
 }
 
 #########################################################
@@ -148,8 +176,10 @@ sub parseCddHits{
     my $f = shift; 
     my @lines = split("\n", $data);
     my $insert_query = getInsertionQuery("cdd", $f); 
+    my $select_query = getSelectQuery("cdd", $f); 
     $dbh->do('begin');
-    my $sth= $dbh->prepare( $insert_query );
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
     my $n = 0;
     foreach my $l (@lines){
         next if $l =~ /^#/;
@@ -161,8 +191,7 @@ sub parseCddHits{
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
 
-            $n += $sth->execute(
-                undef,
+            my @values = (
                 $name, 
                 $u,
                 "Hit",
@@ -171,6 +200,7 @@ sub parseCddHits{
                 $s[3],
                 $s[4],
             ) ;
+            $n += addRow($insth, $selth, \@values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -180,7 +210,7 @@ sub parseCddHits{
             informUser("WARNING: Could not parse CDD result:\n$l\n");
         }
     }
-    $dbh->do('commit') if $n;
+    $dbh->do('commit');
 }
 
 #########################################################
@@ -188,7 +218,6 @@ sub retrieveAndOutputCddInfo{
     my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
     my $hits  = retrieveCddFeatures([keys %uniprot_info], 'hits');
     my @fields = qw / 
-                 id   
                  UniprotId   
                  symbol 
                  ResultType 
@@ -198,7 +227,6 @@ sub retrieveAndOutputCddInfo{
                  End
                  /; 
     my %f_to_prop = ( 
-                 id          => "INTEGER primary key AUTOINCREMENT not null",  
                  UniprotId   => "TEXT not null",  
                  symbol      => "TEXT",
                  ResultType  => "TEXT",
@@ -295,7 +323,6 @@ sub retrieveCddFeatures{
 #########################################################
 sub outputUniprotInfo{
     my @fields = qw / 
-                id   
                 GeneName
                 UniprotId
                 Start
@@ -304,7 +331,6 @@ sub outputUniprotInfo{
                 Note
                 /; 
     my %f_to_prop = ( 
-                id          => "INTEGER primary key AUTOINCREMENT not null",  
                 GeneName    => "TEXT",
                 UniprotId   => "TEXT",
                 Start		=> "INT not null",
@@ -315,9 +341,11 @@ sub outputUniprotInfo{
     createTable('uniprot', \@fields, \%f_to_prop);
     my @lol = ();
     my $insert_query = getInsertionQuery("uniprot", \@fields); 
-    my $sth = $dbh->prepare( $insert_query );
-    informUser("Adding data retrieved from Uniprot to 'uniprot' table of $opts{d}.\n");
+    my $select_query = getSelectQuery("uniprot", \@fields); 
     $dbh->do('begin');
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
+    informUser("Adding data retrieved from Uniprot to 'uniprot' table of $opts{d}.\n");
     my $n = 0; 
     foreach my $id (sort keys %uniprot_info){
         my $name = $uniprot_to_genename{$id};
@@ -325,17 +353,15 @@ sub outputUniprotInfo{
             my ($start, $end) = split('-', $k);
             foreach my $f (@{$uniprot_info{$id}->{$k}}){
                 my ($feature, $note) = split(/\|/, $f );
-                $n += $sth->execute
-                    (
-                        undef,
+                my @values = (
                         $name,
                         $id,
                         $start,
                         $end,
                         $feature,
                         $note,
-                        
                     );
+                $n += addRow($insth, $selth, \@values);
                 if ($n == $max_commit ){
                     $dbh->do('commit');
                     $dbh->do('begin');
@@ -344,7 +370,7 @@ sub outputUniprotInfo{
             }
         }
     }
-    $dbh->do('commit') if $n;
+    $dbh->do('commit');
 }
 
 #########################################################
@@ -360,7 +386,6 @@ sub by_unipro_coords{
 #########################################################
 sub outputTranscriptInfo{
     my @fields = qw /
-                    id
                     Symbol
                     EnsemblGeneID
                     EnsemblTranscriptID
@@ -372,10 +397,9 @@ sub outputTranscriptInfo{
                     TranscriptRank	
                 /;
     my %f_to_prop = ( 
-                id                  => "INTEGER primary key AUTOINCREMENT not null",  
                 Symbol			    => "TEXT",
                 EnsemblGeneID	    => "TEXT not null",
-                EnsemblTranscriptID => "TEXT not null",
+                EnsemblTranscriptID => "TEXT primary key not null",
                 EnsemblProteinID    => "TEXT",
                 RefSeq_mRNA			=> "TEXT",
                 CCDS			    => "TEXT",
@@ -386,8 +410,9 @@ sub outputTranscriptInfo{
     createTable('transcripts', \@fields, \%f_to_prop);
     informUser("Adding transcript data retrieved from Ensembl to 'transcripts' table of $opts{d}.\n");
     my $insert_query = getInsertionQuery("transcripts", \@fields); 
-    my $sth = $dbh->prepare( $insert_query );
-    
+    my $select_query = getSelectQuery("transcripts", \@fields); 
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
     $dbh->do('begin');
     my $n = 0;
     foreach my $ensg (keys %genes){
@@ -420,8 +445,7 @@ sub outputTranscriptInfo{
                 $uniprot =  $enst_to_uniprot{$t};
             }
             
-            $n += $sth->execute (
-                 undef,
+            my @values = (
                  $symbol, 
                  $ensg,
                  $t, 
@@ -432,6 +456,7 @@ sub outputTranscriptInfo{
                  $score,
                  $rank,
             ); 
+            $n += addRow($insth, $selth, \@values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
