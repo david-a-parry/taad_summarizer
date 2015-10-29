@@ -3,6 +3,7 @@
 
 use strict;
 use warnings;
+use DBI;
 use Getopt::Long;
 use Data::Dumper;
 use Term::ProgressBar;
@@ -31,7 +32,7 @@ GetOptions(
     'o|output=s',       #xlsx output
     'n|no_blanks',      #no blank samples
     'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
-    't|transcripts=s',  #optional tsv list of transcript IDs in order of priority
+    't|transcript_database=s',  #optional sqlite database of transcripts and protein info 
     'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
     'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
     'd|depth=i',         #optional min depth for sample call
@@ -42,11 +43,9 @@ GetOptions(
     'g|gq=f',            #min GQ quality for calls
     's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
     'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
-    't|transcripts=s',  #optional tsv list of transcript IDs plus links to uniprot IDs in order of priority
     'rules=s',        #optional tsv file of mutation rules
-    'u|uniprot_data=s', #optional uniprot data file
-    'c|cdd_data=s',     #optional CDD data file
     'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
+    'validations_file=s', #csv file of validation status of variants
     'p|progress',       #show a progress bar?
     'x|do_not_merge',    #do not merge cells
     '1|single_sheet',
@@ -95,7 +94,6 @@ my @pheno_fields = (); #list of phenotype fields found
 if ($opts{phenotype_file}){
     informUser("Checking phenotype file\n");
     ($phenotypes, @pheno_fields) = readPhenotypeFile();
-    @pheno_fields = sort @pheno_fields;
 }
 #check HGMD VCF and retrieve search arguments 
 
@@ -113,25 +111,16 @@ my %clnsig_codes = getClnSigCodes();
 my %so_ranks = ();
 setConsequenceRanks();
 
-#open and check transcripts list
-
+#open and check transcript and crossref database list
+my $dbh;
+my $driver   = "SQLite";
 my %transcript_ranks = ();
-my %enst_to_uniprot = ();
-setTranscriptsRanks();
-
-#read uniprot data
-my %uniprot_features = ();
-readUniprotFile();
-
-#read CDD data
-my %cdd_features = ();
-readCddFile();
+my %enst_xref = ();
+readTranscriptDatabase();
 
 #check rules
-
 my %rules = ();
 setMutationRules();
-
 
 #setup our hash of headers
 
@@ -197,6 +186,33 @@ if ($xl_obj){
     $xl_obj->DESTROY();
 }
 
+###########################################################
+sub readTranscriptDatabase{
+    return if not $opts{t};
+    $dbh = DBI->connect("DBI:$driver:$opts{t}", {RaiseError => 1})
+      or die "Could not connect to sqlite database '$opts{t}': " . DBI->errstr . "\n";
+    my %tables = map {$_ => undef} $dbh->tables;
+    foreach my $t ( qw / transcripts uniprot cdd / ){
+        if (not exists $tables{"\"main\".\"$t\""}){
+            die "ERROR: Could not find table '$t' in $opts{t} - did you use dbCreator.pl to create this database?\n";
+        }
+    }
+    my $q = "SELECT EnsemblGeneID, EnsemblTranscriptID, EnsemblProteinID, RefSeq_mRNA, CCDS,  Uniprot, TranscriptRank FROM transcripts";
+    #we could do lazy loading for when we need to rank transcripts
+    #but for current uses this isn't really worth the effort
+    my $all = $dbh->selectall_arrayref($q);
+    foreach my $tr (@$all){
+        $transcript_ranks{$tr->[0]}->{$tr->[1]} = $tr->[6];
+        my $i = 3;
+        my %xrefs = map {$_ => $i++} qw / refseq ccds uniprot / ; 
+        foreach my $x (keys %xrefs){
+            if (defined $tr->[$xrefs{$x}]){
+                $enst_xref{$tr->[1]}->{$x} = $tr->[$xrefs{$x}];
+            }
+        }
+    }
+    
+}
 ###########################################################
 sub getAfAnnotations{
     my $h = shift;
@@ -357,7 +373,7 @@ sub readPhenotypeFile{
     }
     close $PHENO;
     delete $cols{sample_id}; 
-    return \%pheno, keys %cols;
+    return \%pheno, sort keys %cols;
 }
 
 ###########################################################
@@ -646,6 +662,8 @@ sub writeToSheet{
             canonical
             hgvsc
             hgvsp
+            exon
+            intron
             polyphen
             sift
             DOMAINS
@@ -688,7 +706,7 @@ sub writeToSheet{
     }
     my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
     
-    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp / );
+    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp exon intron / );
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     foreach my $f (@vep_fields){
         push @row, $csq_to_report->{$f};
@@ -1148,6 +1166,7 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
+            Exon
             Domains
             DomainPosition
             DomainCoordinates
@@ -1367,6 +1386,7 @@ sub getHeaders{
             Consequence 
             HGVSc 
             HGVSp 
+            Exon
             Domains
             DomainPosition
             DomainCoordinates
@@ -1419,6 +1439,11 @@ sub rankTranscriptsAndConsequences{
     @$csq_array = rankConsequences(@$csq_array); 
     my $most_damaging = $csq_array->[0]->{consequence} ;
     @$csq_array = rankTranscripts(@$csq_array); 
+    if (%rules){
+        if (my $matched = checkRules($csq_array){
+            return $matched;
+        }
+    }
     if ($most_damaging eq 'missense_variant' or 
         $most_damaging eq 'protein_altering_variant' or  
         $most_damaging =~ /^inframe_(inser|dele)tion$/
@@ -1429,6 +1454,52 @@ sub rankTranscriptsAndConsequences{
         }
     }
     return first { $_->{consequence} eq $most_damaging } @$csq_array;
+}
+
+###########################################################
+sub checkRules{
+    my $csq_array = shift;#ref to array of VEP consequences 
+    #array should be sorted in order of preferred transcripts
+    #return first consequence (if any) that matches a rule
+    foreach my $c (@$csq_array){
+        next if not $c->{ensp};#skip non-coding
+        next if not $c->{amino_acids};#skip any non-coding variant
+        next if not $c->{protein_position};
+        my $uniprot = $enst_xref{$c->{feature}}->{uniprot}; 
+        next if not $uniprot;
+        next if not $rules{$uniprot}; 
+        if ( my $rule = assessRules($c, $uniprot) ){
+            $c->{rule} = $rule;
+            return $c;
+        }
+}
+
+###########################################################
+sub assessRules{
+    my $csq = shift;
+    my $uniprot = shift;
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start; 
+    foreach my $r (@{ $rules{$uniprot} } ){ 
+        if ($r->{mutations} ne 'any'){
+            my @classes = split(",", $r->{mutations});
+            my @s_csq = split("&", $csq->{consequence} );
+            my $match = 0;
+            foreach my $s (@s_csq){
+                $match++ if grep { $_ eq $s } @classes;
+            }
+            next if not $match;
+        }
+        if ($r->{type} eq 'cdd'){
+            ...
+        }elsif($r->{type} eq 'uniprot'){
+            ...
+        }elsif($r->{type} eq 'residues'){
+            ...
+        }else{
+            informUser("WARNING: Do not understand rule of type '$r->{type}'!\n";
+        }
+    } 
 }
 ###########################################################
 sub checkCollagenDomain{
@@ -1720,62 +1791,55 @@ sub getTranscriptsRanks{
     return -1 if not defined $idx;
     return $idx;
 }
-###########################################################
-sub setTranscriptsRanks{
-    return if ( not $opts{t} );
-    open (my $TR, $opts{t}) or die "Can't open --transcripts file ($opts{t}) for reading: $!\n";
-    my $header = <$TR>;
-    $header =~ s/^#+//;
-    my %tr_columns = getColumns($header);
-    foreach my $req ( qw / symbol transcript uniprot / ){
-        if (not exists  $tr_columns{$req}){
-            die "Could not find required column '$req' ".
-                "in header of --transcripts file $opts{t}. ".
-                "Found the following columns:\n" . 
-                join("\n", sort { $tr_columns{$a} <=> $tr_columns{$b} } keys %tr_columns) . 
-                "\n";
-        }
-    }
-
-    while (my $line = <$TR>){
-        chomp $line;
-        my @split = split("\t", $line); 
-        my $symbol = uc($split[ $tr_columns{symbol} ]);
-        my $transcript = uc ($split[ $tr_columns{transcript} ]); 
-        push @{$transcript_ranks{$symbol} }, $transcript; 
-        my $uniprot = uc($split[ $tr_columns{uniprot} ]);
-        if ($uniprot ne '.'){
-             $enst_to_uniprot{$transcript} = $uniprot;
-        }
-    }
-    close $TR;
-}
 
 ###########################################################
-sub readUniprotFile{
-    return if ( not $opts{u} );
-    open (my $UNI, $opts{u}) or die "Can't open --uniprot file ($opts{u}) for reading: $!\n";
-    my $header = <$UNI>;
-    $header =~ s/^#+//;
-    my %tr_columns = getColumns($header);
-    foreach my $req ( qw / UniprotId Start End Feature Note / ){
-        if (not exists  $tr_columns{$req}){
-            ##TODO
-        }
-    }
-    ##TODO
-    close $UNI;
-}
-
-###########################################################
-sub readCddFile{
-    ...
-}
-
-###########################################################
-
 sub setMutationRules{
-    ...
+    return if not $opts{rules};
+    open (my $RULES, $opts{rules}) or die "Cannot open rules file '$opts{rules}': $!\n";
+    my $header = <$RULES>; 
+    my %col = getColumns($header); 
+    foreach my $c (
+     qw /
+		Uniprot
+		CddFeatureType
+		UniprotFeatureType
+		Coordinates
+		MutationType
+        / 
+    ){
+        if (not exists $col{$c}){
+            die "Required columns '$c' not found in rules file '$opts{rules}!\n";
+        }
+    }
+    while (my $line = <$RULES>){
+        chomp $line;
+        my @split = split("\t", $line);
+        #this allows for multiple rules per line
+        if ($split[$col{CddFeatureType}]){
+            my $r = { 
+                      type      => "cdd",
+                      feature   => $split[$col{CddFeatureType}],
+                      mutations => $split[$col{MutationType}],
+                    };
+            push @{ $rules{$split[0]} } , $r;
+        }
+        if ($split[$col{UniprotFeatureType}]){
+            my $r = { 
+                      type      => "uniprot",
+                      feature   => $split[$col{UniprotFeatureType}],
+                      mutations => $split[$col{MutationType}],
+                    };
+            push @{ $rules{$split[0]} } , $r;
+        }
+        if ($split[$col{Coordinates}]){
+            my $r = { 
+                      type      => "residues",
+                      feature   => $split[$col{Coordinates}],
+                      mutations => $split[$col{MutationType}],
+                    };
+            push @{ $rules{$split[0]} } , $r;
+        }
+    }
 }
 
 ###########################################################
@@ -1919,9 +1983,9 @@ VCF of HGMD variations converted with hgmdMartToVcf.pl.
 
 Optional ClinVar VCF to add ClinVar CLINSIG annotations.
 
-=item B<-t    --transcripts>
+=item B<-t    --transcript_database>
 
-Optional tsv list of transcript IDs in order of priority.
+Optional sqlite database of transcripts and cross references created with dbCreator.pl 
 
 =item B<-b    --allele_balance>
 
