@@ -1437,15 +1437,15 @@ sub addSheet{
 sub rankTranscriptsAndConsequences{
     my $csq_array = shift;#ref to array of VEP consequences 
     @$csq_array = rankConsequences(@$csq_array); 
-    my $most_damaging = $csq_array->[0]->{consequence} ;
+    my $most_damaging = getMostDamagingConsequence($csq_array->[0]->{consequence}) ;
     @$csq_array = rankTranscripts(@$csq_array); 
     if (%rules){
-        if (my $matched = checkRules($csq_array){
+        if ( my $matched = checkRules($csq_array) ){
             return $matched;
         }
     }
-    if ($most_damaging eq 'missense_variant' or 
-        $most_damaging eq 'protein_altering_variant' or  
+    if ($most_damaging =~ /missense_variant/ or 
+        $most_damaging =~ /protein_altering_variant/ or  
         $most_damaging =~ /^inframe_(inser|dele)tion$/
     ){
         #check if is mutation of glycine in collagen triple helix and return
@@ -1453,7 +1453,7 @@ sub rankTranscriptsAndConsequences{
             return $glyxy_csq;
         }
     }
-    return first { $_->{consequence} eq $most_damaging } @$csq_array;
+    return first { $_->{consequence} =~ $most_damaging } @$csq_array;
 }
 
 ###########################################################
@@ -1472,6 +1472,7 @@ sub checkRules{
             $c->{rule} = $rule;
             return $c;
         }
+    }
 }
 
 ###########################################################
@@ -1497,10 +1498,11 @@ sub assessRules{
         }elsif($r->{type} eq 'residues'){
             ...
         }else{
-            informUser("WARNING: Do not understand rule of type '$r->{type}'!\n";
+            informUser("WARNING: Do not understand rule of type '$r->{type}'!\n");
         }
     } 
 }
+
 ###########################################################
 sub checkCollagenDomain{
 # only applicable to missense and inframe indels
