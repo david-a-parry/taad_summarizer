@@ -149,8 +149,8 @@ sub parseCddFeats{
                          map { s/^[A-Z]+//; $_ } 
                          split(",", $s[3]);
             my @values = (
-                $name, 
                 $u,
+                $name, 
                 "Feature",
                 $s[2],
                 $s[3],
@@ -192,8 +192,8 @@ sub parseCddHits{
             my $name = $uniprot_to_genename{$u};
 
             my @values = (
-                $name, 
                 $u,
+                $name, 
                 "Hit",
                 $s[8],
                 undef,
