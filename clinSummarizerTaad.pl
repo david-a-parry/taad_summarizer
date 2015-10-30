@@ -58,6 +58,13 @@ pod2usage( -verbose => 1 ) if $opts{h};
 pod2usage( -verbose => 2 ) if $opts{manual};
 pod2usage( -exitval => 2, -message => "-i/--input is required" ) if (not $opts{i});
 pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m});
+if ($opts{rules} and not $opts{t}){
+    my $msg = <<EOT
+WARNING: CDD or Uniprot rules will not be used without specifying a transcript database using the -t/--transcript_database option. Only 'coordinate' based rules will be considered.
+EOT
+;
+    informUser($msg);
+}
 
 #create our http client for ensembl REST queries 
 my $http = HTTP::Tiny->new();
@@ -114,6 +121,7 @@ setConsequenceRanks();
 #open and check transcript and crossref database list
 my $dbh;
 my $driver   = "SQLite";
+my %search_handles = ();
 my %transcript_ranks = ();
 my %enst_xref = ();
 readTranscriptDatabase();
@@ -211,7 +219,25 @@ sub readTranscriptDatabase{
             }
         }
     }
-    
+    %search_handles = 
+    (
+        cdd     =>  $dbh->prepare 
+        (
+            qq{ select * FROM cdd 
+            WHERE UniprotId == ? 
+            and End >= ? 
+            and Start <= ? 
+            } 
+        ),
+        uniprot =>  $dbh->prepare 
+        (
+            qq{ select * FROM uniprot 
+            WHERE UniprotId == ? 
+            and End >= ? 
+            and Start <= ? 
+            } 
+        ),
+    );
 }
 ###########################################################
 sub getAfAnnotations{
@@ -704,7 +730,11 @@ sub writeToSheet{
         }
         push @csq_to_rank , $csq;
     }
-    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
+    my @feature_overlaps = ();
+    foreach my $c (@csq_to_rank){
+        push @feature_overlaps, getCddAndUniprotOverlappingFeatures($c); 
+    }
+    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank, \@feature_overlaps); 
     
     my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp exon intron / );
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
@@ -1436,17 +1466,19 @@ sub addSheet{
 ###########################################################
 sub rankTranscriptsAndConsequences{
     my $csq_array = shift;#ref to array of VEP consequences 
+    my $feats = shift;
+#array to refs of arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
     @$csq_array = rankConsequences(@$csq_array); 
     my $most_damaging = getMostDamagingConsequence($csq_array->[0]->{consequence}) ;
     @$csq_array = rankTranscripts(@$csq_array); 
     if (%rules){
-        if ( my $matched = checkRules($csq_array) ){
+        if ( my $matched = checkRules($csq_array, $feats) ){
             return $matched;
         }
     }
     if ($most_damaging =~ /missense_variant/ or 
         $most_damaging =~ /protein_altering_variant/ or  
-        $most_damaging =~ /^inframe_(inser|dele)tion$/
+        $most_damaging =~ /inframe_(inser|dele)tion/
     ){
         #check if is mutation of glycine in collagen triple helix and return
         if (my $glyxy_csq = checkCollagenDomain($csq_array)){
@@ -1457,20 +1489,78 @@ sub rankTranscriptsAndConsequences{
 }
 
 ###########################################################
+sub getCddAndUniprotOverlappingFeatures{
+    #returns a ref to an array of hashes of overlapping features
+    my @hits = (); 
+    return \@hits if not $dbh;
+    my $csq = shift;
+    my $uniprot = $enst_xref{$csq->{feature}}->{uniprot}; 
+    return \@hits if not $uniprot;
+    return \@hits if not $csq->{ensp};#skip non-coding
+    return \@hits if not $csq->{amino_acids};#skip any non-coding variant
+    return \@hits if not $csq->{protein_position};
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start;
+    #get overlapping uniprot features
+    $search_handles{uniprot}->execute($uniprot, $p_start, $p_end)
+      or die "Error searching 'uniprot' table in '$opts{t}': " . 
+      $search_handles{uniprot} -> errstr;
+    while (my @row = $search_handles{uniprot}->fetchrow_array()) {
+       #CREATE TABLE uniprot (GeneName TEXT, UniprotId TEXT, Start INT not null, End INT not null, Feature TEXT not null, Note TEXT);
+        my $hash = 
+        { 
+            type    => "uniprot", 
+            start   => $row[2],
+            end     => $row[3],
+            feature => $row[4],
+            note    => $row[5],
+        }; 
+        push @hits, $hash;
+    }
+    
+    $search_handles{cdd}->execute($uniprot, $p_start, $p_end)
+      or die "Error searching 'cdd' table in '$opts{t}': " . 
+      $search_handles{cdd} -> errstr;
+    while (my @row = $search_handles{cdd}->fetchrow_array()) {
+        #CREATE TABLE cdd (UniprotId TEXT not null, symbol TEXT, ResultType TEXT, Feature TEXT, Residues TEXT, Start INT not null, End INT not null);
+        my $type = '';
+        if ($row[2] eq 'Feature'){
+            $type = 'cdd_feature';
+        }elsif ($row[2] eq 'Hit'){
+            $type = 'cdd_hit';
+        }else{
+            informUser("WARNING: Do not understand ResultType field '$row[2]' in cdd table of $opts{t} - ignoring.\n");
+            next;
+        }
+        my $hash = 
+        { 
+            type     => $type, 
+            feature  => $row[3],
+            residues => $row[4],#residues are only present in 'Feature' types, not 'Hit'
+            start    => $row[5],
+            end      => $row[6],
+        }; 
+        push @hits, $hash;
+    }
+    return \@hits;
+}
+
+###########################################################
 sub checkRules{
-    my $csq_array = shift;#ref to array of VEP consequences 
-    #array should be sorted in order of preferred transcripts
-    #return first consequence (if any) that matches a rule
-    foreach my $c (@$csq_array){
-        next if not $c->{ensp};#skip non-coding
-        next if not $c->{amino_acids};#skip any non-coding variant
-        next if not $c->{protein_position};
-        my $uniprot = $enst_xref{$c->{feature}}->{uniprot}; 
+    my $csq_array = shift;
+#ref to array of VEP consequences 
+#should be sorted in order of preferred transcripts
+#return first consequence (if any) that matches a rule
+    my $feats = shift;
+#array to refs of arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
+    for (my $i = 0; $i < @$csq_array; $i++){
+        next if not @{$feats->[$i]};
+        my $uniprot = $enst_xref{$csq_array->[$i]->{feature}}->{uniprot}; 
         next if not $uniprot;
         next if not $rules{$uniprot}; 
-        if ( my $rule = assessRules($c, $uniprot) ){
-            $c->{rule} = $rule;
-            return $c;
+        if ( my @rules = assessRules($csq_array->[$i], $feats->[$i], $uniprot) ){
+            $csq_array->[$i]->{rule} = join(";", @rules);
+            return $csq_array;
         }
     }
 }
@@ -1478,9 +1568,10 @@ sub checkRules{
 ###########################################################
 sub assessRules{
     my $csq = shift;
+    my $feats_list = shift;
+#ref of arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
     my $uniprot = shift;
-    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
-    $p_end ||= $p_start; 
+    my @rules = ();
     foreach my $r (@{ $rules{$uniprot} } ){ 
         if ($r->{mutations} ne 'any'){
             my @classes = split(",", $r->{mutations});
@@ -1491,17 +1582,100 @@ sub assessRules{
             }
             next if not $match;
         }
-        if ($r->{type} eq 'cdd'){
-            ...
-        }elsif($r->{type} eq 'uniprot'){
-            ...
-        }elsif($r->{type} eq 'residues'){
-            ...
+        if ( $r->{type} eq 'cdd' ){
+            if ( my $match = assessCddRule($r, $csq, $feats_list) ){
+                push @rules, $match;
+            }
+        }elsif( $r->{type} eq 'uniprot' ){
+            if ( my $match = assessUniprotRule($r, $csq, $feats_list) ){
+                push @rules, $match;
+            }
+        }elsif( $r->{type} eq 'residues' ){
+            if ( my $match = assessResiduesRule($r, $csq, $feats_list) ){
+                push @rules, $match;
+            }
         }else{
             informUser("WARNING: Do not understand rule of type '$r->{type}'!\n");
         }
     } 
+    return @rules;
 }
+
+###########################################################
+sub assessCddRule{
+    my ($rule, $csq, $feats_list) = @_;
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start;
+    my @aa = split ("/", $csq->{amino_acids} ) ;
+    s/-// for @aa; #turn deleted AAs to empty strings
+    my @matched_rules = ();
+    foreach my $f (@$feats_list){
+        #all entries in @$feats_list overlap our variant
+        next if lc($f->{feature}) ne lc($rule->{feature});
+        if ($f->{type} eq 'cdd_feature'){
+        #if a feature we want to check if mutation alters one of the
+        #specific feature residues
+            if (my @feature_residues_altered 
+              = checkFeatureResidues
+                (
+                    \@aa, 
+                    $f, 
+                    $p_start, 
+                    $p_end
+                )
+            ){
+                push @matched_rules, @feature_residues_altered;
+            }
+        }elsif ($f->{type} eq 'cdd_hit'){
+            push @matched_rules, "$f->{type}:$f->{feature}";
+        }
+    }
+    return join("/", @matched_rules); 
+}
+
+###########################################################
+sub checkFeatureResidues{
+    my ($aas, $f, $p_start, $p_end) = @_;
+    my @residues = split(",", $f->{residues}); 
+    my @matched_rules = ();
+    foreach my $residue (@residues){
+        my ($res, $pos);
+        if ($residue =~ /^([A-Z])(\d+)$/){
+            ($res, $pos) = ($1, $2);
+            my @wt_aa =  split ("", $aas->[0]); 
+            my @mut_aa =  split ("", $aas->[1]); 
+            for ( my $i = 0; $i < @wt_aa; $i++ ){
+            #this should handle instances where change is a substitution
+            # or deletion
+            # do not know how to handle insertions
+                my $wt_pos = $p_start + $i;
+                next if $wt_pos < $pos;
+                last if $wt_pos > $pos;
+                if ($wt_aa[$i] eq $res){
+                    if ($i > @mut_aa or $mut_aa[$i] ne $res){
+                        #mutation has altered feature residue
+                        push @matched_rules, "$f->{type}:$f->{feature}$res$pos";
+                    }
+                }
+            } 
+        }else{
+            informUser("ERROR: Do not know how to parse CDD feature residue '$residue' - skipping.\n"); 
+            next;
+        }
+    }
+    return @matched_rules;
+}
+
+###########################################################
+sub assessUniprotRule{
+    ...
+}
+
+###########################################################
+sub assessResiduesRule{
+    ...
+}
+
 
 ###########################################################
 sub checkCollagenDomain{
