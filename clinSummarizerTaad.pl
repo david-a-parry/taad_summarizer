@@ -348,6 +348,7 @@ sub byCsqClass{
             HGMD_DM 
             ClinVarPathogenic 
             LOF 
+            Rules
             CollagenGlyXY 
             HGMD_other 
             DamagingMissense 
@@ -671,17 +672,11 @@ sub writeToSheet{
     push @row, $clnSig, $clnTraits; 
     push @row, $cvarConflicted;
     
-    #add standard VCF fields from this allele only
-    foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
-        push @row, $var->{$f};
-    }
-    push @row, VcfReader::getVariantField($l, 'ID');
-    push @row, VcfReader::getVariantField($l, 'QUAL');
-    push @row, VcfReader::getVariantField($l, 'FILTER');
     #deal with VEP annotations
     my @get_vep =  
       qw /
             Symbol
+            Gene
             Consequence
             Allele
             feature
@@ -725,19 +720,31 @@ sub writeToSheet{
         next if $csq->{allele} ne $alt_to_vep{ $var->{ORIGINAL_ALT} };
         #if we've provided a list of RefSeq ranks skip if this gene symbol is not listed
         if (keys %transcript_ranks){
-            my $sym = uc($csq->{symbol});
-            next if not exists $transcript_ranks{$sym};
+            my $gene = uc($csq->{gene});
+            next if not exists $transcript_ranks{$gene};
         }
         push @csq_to_rank , $csq;
     }
-    my @feature_overlaps = ();
-    foreach my $c (@csq_to_rank){
-        push @feature_overlaps, getCddAndUniprotOverlappingFeatures($c); 
+    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
+    if ($opts{rules}){
+        my $o = $csq_to_report->{rule};
+        $o ||= '';
+        push @row, $o;
     }
-    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank, \@feature_overlaps); 
-    
+    if ($opts{t}){
+        my $o = $csq_to_report->{overlap_features};
+        $o ||= '';
+        push @row, $o;
+    }
+    #add standard VCF fields from this allele only
+    foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
+        push @row, $var->{$f};
+    }
+    push @row, VcfReader::getVariantField($l, 'ID');
+    push @row, VcfReader::getVariantField($l, 'QUAL');
+    push @row, VcfReader::getVariantField($l, 'FILTER');
+
     my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp exon intron / );
-    my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     foreach my $f (@vep_fields){
         push @row, $csq_to_report->{$f};
     }
@@ -753,6 +760,7 @@ sub writeToSheet{
         start_lost
         transcript_amplification
     /;
+    my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
     my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
     if (@$matches){
@@ -761,12 +769,14 @@ sub writeToSheet{
         $s_name = "ClinVarPathogenic";
     }elsif (exists $lofs{$most_damaging_csq}){
         $s_name = "LOF";
+    }elsif (exists $csq_to_report->{rule} ){
+        $s_name = "Rules";
+    #check if in collagen domain
+    }elsif (exists $csq_to_report->{glyxy} ){
+        $s_name = "CollagenGlyXY";
     }elsif ($most_damaging_csq eq 'missense_variant'){
-        #check if in collagen domain
-        if (exists $csq_to_report->{glyxy} ){
-            $s_name = "CollagenGlyXY";
         #check if damaging or benign...
-        }elsif ($allele_cadd  >= 10 and 
+        if ($allele_cadd  >= 10 and 
             $csq_to_report->{polyphen} =~ /damaging/i and 
             $csq_to_report->{sift} =~ /deleterious/i
         ){
@@ -776,10 +786,7 @@ sub writeToSheet{
         }
     }elsif( $most_damaging_csq =~  /^inframe_(inser|dele)tion$/ or
             $most_damaging_csq eq 'protein_altering_variant'){
-        #check if in collagen domain
-        if (exists $csq_to_report->{glyxy}){
-            $s_name = "CollagenGlyXY";
-        }elsif ($allele_cadd >= 10){
+        if ($allele_cadd >= 10){
             $s_name = "DamagingMissense";
         }else{
             $s_name = "BenignMissense";
@@ -787,7 +794,7 @@ sub writeToSheet{
     }else{
         $s_name = "Other";
     }
-
+    
     push @row, $csq_to_report->{domains};
     push @row, $csq_to_report->{glyxy_pos};
     push @row, $csq_to_report->{domain_coords};
@@ -1153,6 +1160,7 @@ sub setupOutput{
         $sheets{HGMD} = 0;
         $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{Variants});
         $sheets{LOF} = addSheet("LOF", $headers{Variants});
+        $sheets{Rules} = addSheet("Rules", $headers{Variants}) if $opts{rules};
         $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{Variants});
         $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{Variants});
         $sheets{BenignMissense} = addSheet("BenignMissense", $headers{Variants});
@@ -1197,6 +1205,7 @@ sub getHeaders{
             HGVSc 
             HGVSp 
             Exon
+            Intron
             Domains
             DomainPosition
             DomainCoordinates
@@ -1417,6 +1426,7 @@ sub getHeaders{
             HGVSc 
             HGVSp 
             Exon
+            Intron
             Domains
             DomainPosition
             DomainCoordinates
@@ -1431,7 +1441,7 @@ sub getHeaders{
     );
 
     my $md_spl = 6;#colu no. to add primers or validated columns to mostdamaging sheet
-    my $v_spl = 9; #column no. to add uniprot/cdd domain info to variant sheets
+    my $v_spl = 10; #column no. to add uniprot/cdd domain info to variant sheets
     if ($opts{primer_file}){
         push @{$h{Variants}}, "primers";
         splice (@{$h{mostdamaging}}, $md_spl++, 0, "primers");
@@ -1445,6 +1455,14 @@ sub getHeaders{
             push @{$h{Variants}}, $ph;
             splice (@{$h{mostdamaging}}, $md_spl++, 0, $ph); 
         }
+    }
+    if ($opts{rules}){
+        splice (@{$h{Variants}}, $v_spl++, 0, "RuleMatched"); 
+        splice (@{$h{mostdamaging}}, 9 + $md_spl++, 0, "RuleMatched"); 
+    }
+    if ($opts{t}){
+        splice (@{$h{Variants}}, $v_spl++, 0, "Uniprot/CDD_Features"); 
+        splice (@{$h{mostdamaging}}, 9 + $md_spl++, 0, "Uniprot/CDD_Features"); 
     }
     return %h;
 }
@@ -1466,14 +1484,18 @@ sub addSheet{
 ###########################################################
 sub rankTranscriptsAndConsequences{
     my $csq_array = shift;#ref to array of VEP consequences 
-    my $feats = shift;
-#array to refs of arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
     @$csq_array = rankConsequences(@$csq_array); 
-    my $most_damaging = getMostDamagingConsequence($csq_array->[0]->{consequence}) ;
+    my $most_damaging = getMostDamagingConsequence($csq_array->[0]) ;
     @$csq_array = rankTranscripts(@$csq_array); 
     if (%rules){
-        if ( my $matched = checkRules($csq_array, $feats) ){
+        if ( my $matched = checkRules($csq_array) ){
             return $matched;
+        }
+    }elsif($opts{t}){
+        #if not checking rules just use getCddAndUniprotOverlappingFeatures 
+        #to annotate any overlapping features which will be added to $csq hash
+        foreach my $csq (@$csq_array){
+            getCddAndUniprotOverlappingFeatures($csq);
         }
     }
     if ($most_damaging =~ /missense_variant/ or 
@@ -1498,6 +1520,7 @@ sub getCddAndUniprotOverlappingFeatures{
     return \@hits if not $uniprot;
     return \@hits if not $csq->{ensp};#skip non-coding
     return \@hits if not $csq->{amino_acids};#skip any non-coding variant
+    return \@hits if (split("/", $csq->{amino_acids}) < 2); 
     return \@hits if not $csq->{protein_position};
     my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
     $p_end ||= $p_start;
@@ -1542,6 +1565,13 @@ sub getCddAndUniprotOverlappingFeatures{
         }; 
         push @hits, $hash;
     }
+    my @hit_summary = () ;
+    foreach my $h (@hits){
+        push @hit_summary, "$h->{type},$h->{feature},$h->{start}-$h->{end}";
+    }
+    if (@hit_summary){
+        $csq->{overlap_features} = join("/", @hit_summary); 
+    }
     return \@hits;
 }
 
@@ -1551,16 +1581,15 @@ sub checkRules{
 #ref to array of VEP consequences 
 #should be sorted in order of preferred transcripts
 #return first consequence (if any) that matches a rule
-    my $feats = shift;
-#array to refs of arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
     for (my $i = 0; $i < @$csq_array; $i++){
-        next if not @{$feats->[$i]};
         my $uniprot = $enst_xref{$csq_array->[$i]->{feature}}->{uniprot}; 
         next if not $uniprot;
         next if not $rules{$uniprot}; 
-        if ( my @rules = assessRules($csq_array->[$i], $feats->[$i], $uniprot) ){
+        my $feats = getCddAndUniprotOverlappingFeatures($csq_array->[$i]);
+    #ref to arrays of hashes of overlapping cdd/uniprot features from getCddAndUniprotOverlappingFeatures method
+        if ( my @rules = assessRules($csq_array->[$i], $feats, $uniprot) ){
             $csq_array->[$i]->{rule} = join(";", @rules);
-            return $csq_array;
+            return $csq_array->[$i];
         }
     }
 }
@@ -1576,11 +1605,11 @@ sub assessRules{
         if ($r->{mutations} ne 'any'){
             my @classes = split(",", $r->{mutations});
             my @s_csq = split("&", $csq->{consequence} );
-            my $match = 0;
+            my $m = 0;
             foreach my $s (@s_csq){
-                $match++ if grep { $_ eq $s } @classes;
+                $m++ if grep { $_ eq $s } @classes;
             }
-            next if not $match;
+            next if not $m;
         }
         if ( $r->{type} eq 'cdd' ){
             if ( my $match = assessCddRule($r, $csq, $feats_list) ){
@@ -1591,7 +1620,7 @@ sub assessRules{
                 push @rules, $match;
             }
         }elsif( $r->{type} eq 'residues' ){
-            if ( my $match = assessResiduesRule($r, $csq, $feats_list) ){
+            if ( my $match = assessResiduesRule($r, $csq,) ){
                 push @rules, $match;
             }
         }else{
@@ -1627,10 +1656,48 @@ sub assessCddRule{
                 push @matched_rules, @feature_residues_altered;
             }
         }elsif ($f->{type} eq 'cdd_hit'){
-            push @matched_rules, "$f->{type}:$f->{feature}";
+            if (defined $rule->{positions}){
+                if (subCoordAltered($f, $rule->{positions}, \@aa, $p_start, $p_end)){
+                    push @matched_rules, "$f->{type}:$f->{feature}($f->{start}-$f->{end})";
+                }
+            }else{
+                push @matched_rules, "$f->{type}:$f->{feature}($f->{start}-$f->{end})";
+            }
         }
     }
     return join("/", @matched_rules); 
+}
+
+###########################################################
+sub subCoordAltered{
+    my ($f, $pos_s, $aas, $p_start, $p_end) = @_;
+    my @sub_coord = split(",", $pos_s); 
+    foreach my $sc (@sub_coord){
+        my $coord;
+        if ($sc < 0 ){
+            $coord = $f->{end} + $sc + 1;
+        }else{
+            $coord = $f->{start} + $sc - 1;
+        }
+        if (residueAltered($aas, $p_start, $p_end, $coord)){
+            return 1;
+        }
+    }
+    return 0;
+}
+
+###########################################################
+sub residueAltered{
+    my ($aas, $p_start, $p_end, $pos) = @_;
+    my @wt_aa =  split ("", $aas->[0]); 
+    my @mut_aa =  split ("", $aas->[1]); 
+    for ( my $i = 0; $i < @wt_aa; $i++ ){
+        my $wt_pos = $p_start + $i;
+        next if $wt_pos < $pos;
+        return 0 if $wt_pos > $pos;
+        return ($i >= @mut_aa or $mut_aa[$i] ne $wt_aa[$i]);
+    }
+    return 0;
 }
 
 ###########################################################
@@ -1652,10 +1719,12 @@ sub checkFeatureResidues{
                 next if $wt_pos < $pos;
                 last if $wt_pos > $pos;
                 if ($wt_aa[$i] eq $res){
-                    if ($i > @mut_aa or $mut_aa[$i] ne $res){
+                    if ($i >= @mut_aa or $mut_aa[$i] ne $res){
                         #mutation has altered feature residue
                         push @matched_rules, "$f->{type}:$f->{feature}$res$pos";
                     }
+                }else{
+                    informUser("WARNING: $f->{feature} feature residue '$res$pos' not matched ($pos).\n");
                 }
             } 
         }else{
@@ -1668,14 +1737,55 @@ sub checkFeatureResidues{
 
 ###########################################################
 sub assessUniprotRule{
-    ...
+    my ($rule, $csq, $feats_list) = @_;
+    my @matched_rules = ();
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start;
+    my @aa = split ("/", $csq->{amino_acids} ) ;
+    s/-// for @aa; #turn deleted AAs to empty strings
+    foreach my $f (@$feats_list){
+        #all entries in @$feats_list overlap our variant
+        next if $f->{type} ne 'uniprot'; 
+        next if lc($f->{feature}) ne lc($rule->{feature});
+        if (defined $rule->{positions}){
+            if (subCoordAltered($f, $rule->{positions}, \@aa, $p_start, $p_end)){
+                push @matched_rules, "$f->{type}:$f->{feature}($f->{start}-$f->{end})";
+            }
+        }else{
+            push @matched_rules, "$f->{type}:$f->{feature}($f->{start}-$f->{end})";
+        }
+    }
+    return join("/", @matched_rules); 
 }
 
 ###########################################################
 sub assessResiduesRule{
-    ...
+    my ($rule, $csq) = @_;
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start;
+    my @aa = split ("/", $csq->{amino_acids} ) ;
+    s/-// for @aa; #turn deleted AAs to empty strings
+    my @matched_rules = ();
+    my @wt_aa =  split ("", $aa[0]); 
+    my @mut_aa =  split ("", $aa[1]); 
+    my @coords = split(",", $rule->{feature}); 
+    foreach my $c (@coords){
+        my ($r_start, $r_end) = split("-", $c); 
+        $r_end ||= $r_start;
+        next if $r_start > $p_end or $r_end < $p_start;
+        for ( my $i = 0; $i < @wt_aa; $i++ ){
+            my $pos = $p_start + $i;
+            last if $pos > $p_end;
+            next if $pos < $p_start;
+            if ($i >= @mut_aa or $wt_aa[$i] ne $mut_aa[$i]){
+                push @matched_rules, "Residues:$c";
+            }
+        }
+    }
+    my %seen = ();
+    @matched_rules = grep {! $seen{$_}++ } @matched_rules;
+    return join("/", @matched_rules); 
 }
-
 
 ###########################################################
 sub checkCollagenDomain{
@@ -1996,6 +2106,7 @@ sub setMutationRules{
                       type      => "cdd",
                       feature   => $split[$col{CddFeatureType}],
                       mutations => $split[$col{MutationType}],
+                      positions => $split[$col{PositionType}],
                     };
             push @{ $rules{$split[0]} } , $r;
         }
@@ -2004,6 +2115,7 @@ sub setMutationRules{
                       type      => "uniprot",
                       feature   => $split[$col{UniprotFeatureType}],
                       mutations => $split[$col{MutationType}],
+                      positions => $split[$col{PositionType}],
                     };
             push @{ $rules{$split[0]} } , $r;
         }
@@ -2012,6 +2124,7 @@ sub setMutationRules{
                       type      => "residues",
                       feature   => $split[$col{Coordinates}],
                       mutations => $split[$col{MutationType}],
+                      positions => $split[$col{PositionType}],
                     };
             push @{ $rules{$split[0]} } , $r;
         }
