@@ -24,6 +24,7 @@ GetOptions(
     'i|id=s{,}',#  => \@gene_ids,
     'd|db=s', #sqlite database output
     's|species=s',
+    'e|et_folder=s',#optional evolutionary trace folder containing protein predictions
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
@@ -41,7 +42,7 @@ if (-e $opts{d}){
     #should really amend this so that appending is possible, not a priority yet though
 }
 my $driver   = "SQLite";
-my $max_commit = 1000;
+my $max_commit = 5000;
 my $dbh = DBI->connect("DBI:$driver:$opts{d}", {RaiseError => 1}) 
     or die "Could not create sqlite database '$opts{d}': " . DBI->errstr . "\n";
 #$dbh->do("create database $opts{d}") or die "Could not create database '$opts{d}': " . $dbh->errstr . "\n";
@@ -73,6 +74,8 @@ if (not %genes){
 rankTranscriptsAndCrossRef();
 
 outputTranscriptInfo();
+
+outputEvolutionaryTraceInfo();
 
 outputUniprotInfo() ; 
 
@@ -112,14 +115,16 @@ sub getSelectQuery{
 
 #########################################################
 sub addRow{
-    my ($insth, $selth, $vals) = @_;
+    my ($insth, $vals, $selth, ) = @_;
     my @multi_vals = map {($_, defined($_) ? 0 : 1) } @$vals;
-    $selth->execute(@$vals) or die "Could not execute duplicate check query: " 
-   # $selth->execute(@multi_vals) or die "Could not execute duplicate check query: " 
-      . $selth->errstr;
-    if ($selth->fetchrow_arrayref){
-        informUser("Ignoring duplicate entry " . join("|", @$vals) . "\n");
-        return 0;
+    if ($selth){
+        $selth->execute(@$vals) or die "Could not execute duplicate check query: " 
+       # $selth->execute(@multi_vals) or die "Could not execute duplicate check query: " 
+          . $selth->errstr;
+        if ($selth->fetchrow_arrayref){
+            informUser("Ignoring duplicate entry " . join("|", @$vals) . "\n");
+            return 0;
+        }
     }
     my $n = $insth->execute(@$vals) or die "Could not insert values: " . $insth->errstr;
     return $n;
@@ -157,7 +162,7 @@ sub parseCddFeats{
                 $coords[0],
                 $coords[-1],
             ) ;
-            $n += addRow($insth, $selth, \@values);
+            $n += addRow($insth, \@values, $selth);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -200,7 +205,7 @@ sub parseCddHits{
                 $s[3],
                 $s[4],
             ) ;
-            $n += addRow($insth, $selth, \@values);
+            $n += addRow($insth, \@values, $selth);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -361,7 +366,7 @@ sub outputUniprotInfo{
                         $feature,
                         $note,
                     );
-                $n += addRow($insth, $selth, \@values);
+                $n += addRow($insth, \@values, $selth);
                 if ($n == $max_commit ){
                     $dbh->do('commit');
                     $dbh->do('begin');
@@ -384,6 +389,75 @@ sub by_unipro_coords{
 }
 
 #########################################################
+sub outputEvolutionaryTraceInfo{
+    return if not $opts{e};
+    my @fields = qw /
+                    EnsemblTranscriptID
+                    RefSeq_peptide
+                    Position
+                    WildTypeResidue     
+                    MutantResidue   
+                    Score    
+                /;
+    my %f_to_prop = ( 
+                EnsemblTranscriptID => "TEXT not null",
+                RefSeq_peptide      => "TEXT",
+                Position            => "INT not null",
+                WildTypeResidue     => "TEXT",
+                MutantResidue       => "TEXT",
+                Score               => "INT not null",
+                );
+    createTable('EvolutionaryTrace', \@fields, \%f_to_prop);
+    informUser("Adding local Evolutionary Trace data to 'evolutionarytrace' table of $opts{d}.\n");
+    my $insert_query = getInsertionQuery("evolutionarytrace", \@fields); 
+    my $select_query = getSelectQuery("evolutionarytrace", \@fields); 
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
+    $dbh->do('begin');
+    my $n = 0;
+    foreach my $t (keys %transcript_xref){
+        if (exists $transcript_xref{$t}->{RefSeq_peptide}){
+            foreach my $pep (@{$transcript_xref{$t}->{RefSeq_peptide}}){ 
+                my $et_file = "$opts{e}/$pep.pred";
+                if (not -e $et_file){
+                    informUser("WARNING: Could not find Evolutionary Trace " . 
+                      "prediction file for $pep ".
+                      "($et_file). No ET values will be calculated for this protein.\n");
+                    next;
+                }
+                open (my $ET, $et_file) or die "Could not open $et_file: $!\n";
+                while (my $line = <$ET>){
+                    chomp $line;
+                    next if not $line;
+                    my ($res, $score) = split(/\s+/, $line); 
+                    if ($res =~ /([A-Z])(\d+)([A-Z])/){
+                        my ($wt, $pos, $mut)  = ($1, $2, $3);
+                        my @values = (
+                             $t, 
+                             $pep,
+                             $pos,
+                             $wt,
+                             $mut,
+                             $score,
+                        ); 
+                        $n += addRow($insth, \@values);
+                        if ($n == $max_commit ){
+                            $dbh->do('commit');
+                            $dbh->do('begin');
+                            $n = 0;
+                        }
+                    }else{
+                        informUser("ERROR: Could not parse residue '$res' for $pep! Format not understood.\n");
+                    }
+                }
+            }
+        }
+    }
+    $dbh->do('commit');
+}
+
+
+#########################################################
 sub outputTranscriptInfo{
     my @fields = qw /
                     Symbol
@@ -391,6 +465,7 @@ sub outputTranscriptInfo{
                     EnsemblTranscriptID
                     EnsemblProteinID
                     RefSeq_mRNA
+                    RefSeq_peptide
                     CCDS
                     Uniprot
                     TranscriptScore
@@ -402,6 +477,7 @@ sub outputTranscriptInfo{
                 EnsemblTranscriptID => "TEXT primary key not null",
                 EnsemblProteinID    => "TEXT",
                 RefSeq_mRNA			=> "TEXT",
+                RefSeq_peptide      => "TEXT",
                 CCDS			    => "TEXT",
                 Uniprot			    => "TEXT",
                 TranscriptScore		=> "INT not null",
@@ -429,14 +505,18 @@ sub outputTranscriptInfo{
             my $symbol = $genes{$ensg}->{display_name};
             my $score = $transcript_ranks{$ensg}->{$t};
             my $ensp = undef;
-            my $refseq = undef;
+            my $ref_mrna = undef;
+            my $ref_pep = undef;
             my $ccds = undef;
             my $uniprot = undef;
             if (exists $transcript_xref{$t}->{Translation}){
                 $ensp = $transcript_xref{$t}->{Translation};
             }
             if (exists $transcript_xref{$t}->{RefSeq_mRNA}){
-                $refseq = join("/", @{ $transcript_xref{$t}->{RefSeq_mRNA} } );
+                $ref_mrna = join("/", @{ $transcript_xref{$t}->{RefSeq_mRNA} } );
+            } 
+            if (exists $transcript_xref{$t}->{RefSeq_peptide}){
+                $ref_pep = join("/", @{ $transcript_xref{$t}->{RefSeq_peptide} } );
             } 
             if (exists $transcript_xref{$t}->{CCDS}){
                 $ccds = join("/", @{ $transcript_xref{$t}->{CCDS} } );
@@ -450,13 +530,14 @@ sub outputTranscriptInfo{
                  $ensg,
                  $t, 
                  $ensp,
-                 $refseq,
+                 $ref_mrna,
+                 $ref_pep,
                  $ccds,
                  $uniprot,
                  $score,
                  $rank,
             ); 
-            $n += addRow($insth, $selth, \@values);
+            $n += addRow($insth, \@values, $selth);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -464,7 +545,7 @@ sub outputTranscriptInfo{
             }
         }
     }
-    $dbh->do('commit')if $n;
+    $dbh->do('commit');
 }
 #########################################################
 sub rankTranscriptsAndCrossRef{
@@ -513,6 +594,7 @@ sub addXrefs{
             if (grep { $ext->{dbname} eq $_ }  
                 qw ( 
                     RefSeq_mRNA 
+                    RefSeq_peptide
                     CCDS 
                     Uniprot/SWISSPROT
                 ) 
