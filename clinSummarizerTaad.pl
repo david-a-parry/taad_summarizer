@@ -10,7 +10,7 @@ use Term::ProgressBar;
 use POSIX qw/strftime/;
 use Excel::Writer::XLSX;
 use Excel::Writer::XLSX::Utility;
-use List::Util qw(first sum);
+use List::Util qw(first sum max);
 use Pod::Usage;
 use File::Basename;
 use FindBin;
@@ -205,14 +205,14 @@ sub readTranscriptDatabase{
             die "ERROR: Could not find table '$t' in $opts{t} - did you use dbCreator.pl to create this database?\n";
         }
     }
-    my $q = "SELECT EnsemblGeneID, EnsemblTranscriptID, EnsemblProteinID, RefSeq_mRNA, CCDS,  Uniprot, TranscriptRank FROM transcripts";
+    my $q = "SELECT EnsemblGeneID, EnsemblTranscriptID, EnsemblProteinID, RefSeq_mRNA, RefSeq_peptide, CCDS,  Uniprot, TranscriptRank FROM transcripts";
     #we could do lazy loading for when we need to rank transcripts
     #but for current uses this isn't really worth the effort
     my $all = $dbh->selectall_arrayref($q);
     foreach my $tr (@$all){
-        $transcript_ranks{$tr->[0]}->{$tr->[1]} = $tr->[6];
+        $transcript_ranks{$tr->[0]}->{$tr->[1]} = $tr->[7];
         my $i = 3;
-        my %xrefs = map {$_ => $i++} qw / refseq ccds uniprot / ; 
+        my %xrefs = map {$_ => $i++} qw / refseq_mrna refseq_peptide ccds uniprot / ; 
         foreach my $x (keys %xrefs){
             if (defined $tr->[$xrefs{$x}]){
                 $enst_xref{$tr->[1]}->{$x} = $tr->[$xrefs{$x}];
@@ -238,6 +238,17 @@ sub readTranscriptDatabase{
             } 
         ),
     );
+    if (exists $tables{"\"main\".\"EvolutionaryTrace\""}){
+        $search_handles{et} = $dbh->prepare
+        (
+            qq{ select score FROM EvolutionaryTrace
+            WHERE EnsemblTranscriptID == ? 
+            and Position == ? 
+            and WildTypeResidue == ? 
+            and MutantResidue == ? 
+            }
+        );
+    }
 }
 ###########################################################
 sub getAfAnnotations{
@@ -802,6 +813,9 @@ sub writeToSheet{
     foreach my $f (qw / lof lof_filter lof_info lof_flags polyphen sift/){
         push @row, $csq_to_report->{$f};
     }
+    if (exists $search_handles{et} ){
+        push @row, getEtScore($csq_to_report); 
+    }
 
     push @row, $allele_cadd;
 
@@ -940,6 +954,47 @@ sub writeToSheet{
         }
     }
 }
+
+
+###########################################################
+sub getEtScore{
+    #if more than one AA is altered return highest score
+    my @scores = ();
+    my $csq = shift;
+    my ($p_start, $p_end) = split("-", $csq->{protein_position}); 
+    $p_end ||= $p_start;
+    my @aa = split("/", $csq->{amino_acids});
+    return '' if @aa != 2;
+    s/-// for @aa; #turn deleted AAs to empty strings
+    for (my $i = $p_start; $i <= $p_end; $i++){
+        my $j = $p_start - $i;
+        last if ($j > length($aa[1]));
+        my $wt = substr($aa[0], 0, 1); 
+        my $mut = substr($aa[1], 0, 1); 
+        if ($wt ne $mut){
+            $search_handles{et}->execute
+            (
+                $csq->{feature}, 
+                $i, 
+                $wt,
+                $mut,
+            ) or die "Error searching 'EvolutionaryTrace' table in '$opts{t}': " . 
+              $search_handles{et} -> errstr;
+            my $row = 0;
+            while (my $score = $search_handles{et}->fetchrow_array()){
+                push @scores, $score if $score;
+                if ($row == 1){
+                    informUser("WARNING: Only expected one row from EvolutionaryTrace search!\n");
+                }
+                $row++;
+            }
+        }
+    }
+    my $max = max(@scores); 
+    return $max if $max;
+    return '';
+}
+
 ###########################################################
 sub searchPrimers{
 #returns array of matching primer IDs
@@ -1389,8 +1444,9 @@ sub getHeaders{
             HGMD_DM
             ClinVarPathogenic
             CollagenGlyXY
-            HGMD_other
+            Rules
             LOF
+            HGMD_other
             DamagingMissense
             BenignMissense
             Other
@@ -1442,6 +1498,10 @@ sub getHeaders{
 
     my $md_spl = 6;#colu no. to add primers or validated columns to mostdamaging sheet
     my $v_spl = 10; #column no. to add uniprot/cdd domain info to variant sheets
+    if (exists $search_handles{et}){
+        splice (@{$h{Variants}}, -7, 0, "EvolutionaryTraceScore"); 
+        push @{$h{mostdamaging}},  "EvolutionaryTraceScore";
+    }
     if ($opts{primer_file}){
         push @{$h{Variants}}, "primers";
         splice (@{$h{mostdamaging}}, $md_spl++, 0, "primers");
