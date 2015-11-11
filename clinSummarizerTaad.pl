@@ -698,6 +698,7 @@ sub writeToSheet{
             intron
             polyphen
             sift
+            condel
             DOMAINS
             Amino_acids
             protein_position
@@ -810,7 +811,7 @@ sub writeToSheet{
     push @row, $csq_to_report->{glyxy_pos};
     push @row, $csq_to_report->{domain_coords};
 
-    foreach my $f (qw / lof lof_filter lof_info lof_flags polyphen sift/){
+    foreach my $f (qw / lof lof_filter lof_info lof_flags polyphen sift condel / ){
         push @row, $csq_to_report->{$f};
     }
     if (exists $search_handles{et} ){
@@ -1270,6 +1271,7 @@ sub getHeaders{
             LoF_flags
             Polyphen
             SIFT
+            Condel
             CADD
             Sample
             GT
@@ -1492,6 +1494,7 @@ sub getHeaders{
             LoF_flags
             Polyphen
             SIFT
+            Condel
             CADD
         /
     );
@@ -1500,7 +1503,7 @@ sub getHeaders{
     my $v_spl = 10; #column no. to add uniprot/cdd domain info to variant sheets
     if (exists $search_handles{et}){
         splice (@{$h{Variants}}, -7, 0, "EvolutionaryTraceScore"); 
-        push @{$h{mostdamaging}},  "EvolutionaryTraceScore";
+        splice (@{$h{mostdamaging}}, -1, 0,  "EvolutionaryTraceScore");
     }
     if ($opts{primer_file}){
         push @{$h{Variants}}, "primers";
