@@ -49,7 +49,7 @@ GetOptions(
     'p|progress',       #show a progress bar?
     'x|do_not_merge',    #do not merge cells
     '1|single_sheet',
-    'v|verbose',        #print extra progress information
+    'verbose',        #print extra progress information
     'h|?|help',
     'manual',
 ) or pod2usage(-exitval => 2, -message => "Syntax error.\n"); 
@@ -2129,16 +2129,15 @@ sub ensRestQuery{
 ###########################################################
 sub rankTranscripts{
     my @vars = @_;#array of hashes of VEP consequences
-    return sort { getTranscriptsRanks( uc($a->{feature}) ) <=> getTranscriptsRanks( uc($b->{feature}) ) } @vars;
+    return sort { getTranscriptsRanks( $a->{gene}, $a->{feature} ) <=> getTranscriptsRanks( $b->{gene}, $b->{feature} ) } @vars;
 }
 ###########################################################
 sub getTranscriptsRanks{
     my $symbol = shift;
     my $transcript = shift; 
     return -1 if not exists $transcript_ranks{$symbol};
-    my $idx = first { $transcript_ranks{$symbol}->[$_] eq $transcript } 0 ..  $#{$transcript_ranks{$symbol}}; #also returns undef if transcript not found
-    return -1 if not defined $idx;
-    return $idx;
+    return -1 if not exists $transcript_ranks{$symbol}->{$transcript};
+    return $transcript_ranks{$symbol}->{$transcript};
 }
 
 ###########################################################
@@ -2367,7 +2366,7 @@ Min GQ quality for calls.
 
 Display a progress bar.
 
-=item B<-v    --verbose>
+=item B<--verbose>
 
 Show verbose progress information.
 
