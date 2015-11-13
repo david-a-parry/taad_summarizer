@@ -124,7 +124,7 @@ sub parseId {
         $self->{_isEnsemblId} = 0;
         $self->{_isProtein} = 1;
         $self->{_identifierType} = "RefSeq Protein ID";
-    }elsif ($id =~ /[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}/){
+    }elsif ($id =~ /^[OPQ][0-9][A-Z0-9]{3}[0-9]$|^[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/){
         $self->{_isTranscript} = 1;
         $self->{_isEnsemblId} = 0;
         $self->{_isProtein} = 1;
