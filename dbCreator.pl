@@ -722,10 +722,12 @@ sub getGenesFromIds{
         }elsif($parser->get_isTranscript()  or $parser->get_isProtein() ) {
             informUser("Identifying Ensembl gene via transcript cross-reference...\n");
             my $transcript = $restQuery->getTranscriptViaXreg($g, $opts{s});
-            if ($transcript){
+            if ($transcript and ref $transcript eq 'HASH'){
                 if (exists $transcript->{id}){
                     $gene_hash = geneFromEnst($transcript->{id});
                 }
+            }else{
+                print STDERR "WARNING: No transcript identified for ID \"$g\"\n";
             }
         }else{
             informUser("Identifying Ensembl gene via gene cross-reference...\n");
