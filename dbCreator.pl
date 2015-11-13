@@ -151,7 +151,7 @@ sub parseCddFeats{
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
             my @coords = sort { $a <=> $b } 
-                         map { s/^[A-Z]+//; $_ } 
+                         map { s/^[A-Z\-]+//; $_ } 
                          split(",", $s[3]);
             my @values = (
                 $u,
@@ -571,7 +571,7 @@ sub rankTranscriptsAndCrossRef{
                 }
                 
             }
-            addXrefs($t->{id}); 
+            addXrefs($t, $genes{$ensg}); 
         }
         foreach my $id (@longest_trans){
             $transcript_ranks{$ensg}->{$id}++;
@@ -586,7 +586,9 @@ sub rankTranscriptsAndCrossRef{
 
 #########################################################
 sub addXrefs{
-    my $id = shift;
+    my $enst = shift; 
+    my $ensg_ts = shift;
+    my $id = $enst->{id};
     informUser( "Retrieving external IDs for transcript $id...\n");
     my $external = $restQuery->getXrefs(id => $id, all_levels => 1);
     if (ref $external eq 'ARRAY'){
@@ -602,7 +604,7 @@ sub addXrefs{
                 #NOTE that Uniprot entries may include partial/isoform matches
                 if ($ext->{dbname} eq 'Uniprot/SWISSPROT'){
                     if (not exists $uniprot_info{$ext->{primary_id}}){
-                        getUniprotData($ext->{primary_id});
+                        getUniprotData($ext->{primary_id}, $ensg_ts);
                     }
                     if (exists $enst_to_uniprot{$id}){
                         push @{$transcript_xref{$id}->{$ext->{dbname}}} , $ext->{primary_id};
@@ -618,6 +620,7 @@ sub addXrefs{
 #########################################################
 sub getUniprotData{
     my $id = shift;
+    my $ensg_ts = shift;
     informUser( "Retrieving Uniprot text data for $id...\n");
     my $site = "http://www.uniprot.org/uniprot";
     my $url = "$site/$id.txt";
@@ -631,9 +634,25 @@ sub getUniprotData{
         ."Tried URL: $url\nExiting\n" unless $gff;
     # below collects only the transcript that code for
     # the canonical uniprot isoform.
-    my ($name, @t)  = parseUniprotFlat($txt);
+    my ($name, $length, @t)  = parseUniprotFlat($txt);
     if (not @t){
-        die "ERROR: Could not identify Ensembl transcript for canonical isoform of $id!\n";
+        my $matched_length = 0;
+        if ($length){
+            foreach my $enst (@{$ensg_ts->{Transcript}}){
+                if ($enst->{Translation}){
+                    if ($enst->{Translation}->{length} == $length){
+                        $matched_length++;
+                        $enst_to_uniprot{$enst->{id}} = $id;
+                        informUser(
+"WARNING: Could not identify Ensembl transcript for canonical isoform of $id " .
+"- basing match of $enst->{id} on basis of shared translation length.\n");
+                    }
+                }
+            }
+        }
+        if (not $matched_length){
+            informUser ("WARNING: Could not identify Ensembl transcript for canonical isoform of $id!\n");
+        }
     }
     foreach my $t (@t){
         $enst_to_uniprot{$t} = $id;
@@ -648,8 +667,13 @@ sub parseUniprotFlat{
     my @lines = split("\n", $txt);
     my $canonical; 
     my $name = '';
+    my $u_length = 0;
     my @transcripts = ();
     foreach my $l (@lines){
+        if ($l =~ /^ID\s+\S+\s+.*\s(\d+)\s+AA\./){
+            $u_length = $1;
+            next;
+        }
         if ($l =~ /^GN\s+Name=(\S+);/){
             $name = $1;
             next;
@@ -665,10 +689,11 @@ sub parseUniprotFlat{
         }elsif($l =~ /^DR\s/){#if only one isoform there won't be IsoId's
             if($l =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+/){
                 push @transcripts, $1;
+                
             }
         }
     }
-    return ($name, @transcripts);
+    return ($name, $u_length, @transcripts);
 }
 #########################################################
 sub parseUniprotGff{
