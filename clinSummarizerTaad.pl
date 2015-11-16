@@ -1766,7 +1766,7 @@ sub residueAltered{
 ###########################################################
 sub checkFeatureResidues{
     my ($aas, $f, $p_start, $p_end) = @_;
-    my @residues = split(",", $f->{residues}); 
+    my @residues = split(/[\-\,]/, $f->{residues}); 
     my @matched_rules = ();
     foreach my $residue (@residues){
         my ($res, $pos);

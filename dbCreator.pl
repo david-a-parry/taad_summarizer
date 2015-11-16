@@ -151,8 +151,8 @@ sub parseCddFeats{
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
             my @coords = sort { $a <=> $b } 
-                         map { s/^[A-Z\-]+//; $_ } 
-                         split(",", $s[3]);
+                         map { s/^[A-Z]+//g; $_ } 
+                         split(/[\,\-]/, $s[3]);
             my @values = (
                 $u,
                 $name, 
