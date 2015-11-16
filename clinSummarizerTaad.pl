@@ -1766,14 +1766,14 @@ sub residueAltered{
 ###########################################################
 sub checkFeatureResidues{
     my ($aas, $f, $p_start, $p_end) = @_;
-    my @residues = split(/[\-\,]/, $f->{residues}); 
+    my @residues = split(/\,/, $f->{residues}); 
     my @matched_rules = ();
+    my @wt_aa =  split ("", $aas->[0]); 
+    my @mut_aa =  split ("", $aas->[1]); 
     foreach my $residue (@residues){
         my ($res, $pos);
         if ($residue =~ /^([A-Z])(\d+)$/){
             ($res, $pos) = ($1, $2);
-            my @wt_aa =  split ("", $aas->[0]); 
-            my @mut_aa =  split ("", $aas->[1]); 
             for ( my $i = 0; $i < @wt_aa; $i++ ){
             #this should handle instances where change is a substitution
             # or deletion
@@ -1790,6 +1790,20 @@ sub checkFeatureResidues{
                     informUser("WARNING: $f->{feature} feature residue '$res$pos' not matched ($pos).\n");
                 }
             } 
+        }elsif ($residue =~ /^([A-Z])(\d+)-([A-Z])(\d+)$/){
+            my ($res1, $start, $res2, $end)  = ($1, $2, $3, $4);
+            for ( my $i = 0; $i < @wt_aa; $i++ ){
+            #this should handle instances where change is a substitution
+            # or deletion
+            # do not know how to handle insertions
+                my $wt_pos = $p_start + $i;
+                next if $wt_pos < $start;
+                last if $wt_pos > $end;
+                if ($i >= @mut_aa or $mut_aa[$i] ne $wt_aa[$i]){
+                    #mutation has altered feature residue
+                    push @matched_rules, "$f->{type}:$f->{feature}$res1$start-$res2$end";
+                }
+            }
         }else{
             informUser("ERROR: Do not know how to parse CDD feature residue '$residue' - skipping.\n"); 
             next;
