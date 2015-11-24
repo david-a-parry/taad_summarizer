@@ -197,7 +197,7 @@ sub getXrefs{
 ##################################################
 sub useGRCh37Server{
     my $self = shift;
-_   $self->{_server} = $self->{_grch37_server};
+    $self->{_server} = $self->{_grch37_server};
 }
 
 ##################################################
