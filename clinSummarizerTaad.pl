@@ -41,6 +41,7 @@ GetOptions(
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
     'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
     'g|gq=f',            #min GQ quality for calls
+    'pl=f',              #PL score cutoff for REF genotype
     's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
     'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
     'rules=s',        #optional tsv file of mutation rules
@@ -849,17 +850,25 @@ sub writeToSheet{
               field => "GQ",
               all => 1,
               sample_to_columns => \%samples_to_columns,
-              minGQ => $min_gq,
         );
-    my %samp_ads = VcfReader::getSampleGenotypeField
-         (
-              line => $l,
-              field => "AD",
+    my %samp_pls = VcfReader::getSampleGenotypeField
+        (
+              line => $l, 
+              field => "PL",
               all => 1,
               sample_to_columns => \%samples_to_columns,
-              minGQ => $min_gq,
         );
-    
+
+    my %samp_ads = (); 
+    foreach my $s (keys %samples_to_columns){
+        my @ads = VcfReader::getSampleAlleleDepths 
+         (
+              line => $l,
+              sample => $s,
+              sample_to_columns => \%samples_to_columns,
+        );
+        $samp_ads{$s} = \@ads;
+    }    
     my $variant_has_valid_sample = 0;
     foreach my $s (
             sort {$samples_to_columns{$a} <=> $samples_to_columns{$b}} 
@@ -867,13 +876,17 @@ sub writeToSheet{
     ){
         my @alts = split(/[\/\|]/, $samp_gts{$s});
         if (grep { $_ eq $var->{ORIGINAL_ALT} } @alts ){ 
-            my @ads = split(",", $samp_ads{$s}); 
+            my @ads = @{$samp_ads{$s}}; 
             my $depth = sum(@ads);
             if ($opts{d}){
                 next if $opts{d} > $depth;
             }
             if ($opts{g}){
                 eval "$opts{g} <= $samp_gqs{$s}" or next;
+            }
+            if ($opts{pl}){
+                my @pls = split(",", $samp_pls{$s});
+                next if $pls[0] < $opts{pl};
             }
             my $ab = 0;
             if ( $depth > 0){
@@ -887,7 +900,7 @@ sub writeToSheet{
             }
             $variant_has_valid_sample++;
             my $uid = "$uid_base$s";
-            my @sample_cells = ( $s, $samp_gts{$s}, $samp_ads{$s}, $ab, $samp_gqs{$s}, $uid );
+            my @sample_cells = ( $s, $samp_gts{$s}, join(",", @ads) , $ab, $samp_gqs{$s}, $samp_pls{$s},  $uid );
             if (@primers){
                 if (@primer_hits){
                     push @sample_cells, join("/", @primer_hits); 
@@ -1278,6 +1291,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            PL
             UID
         /
     );
@@ -1461,6 +1475,7 @@ sub getHeaders{
             AD
             AB
             GQ
+            PL
             UID
             Category
             Hgmd_ID
@@ -1499,7 +1514,7 @@ sub getHeaders{
         /
     );
 
-    my $md_spl = 6;#colu no. to add primers or validated columns to mostdamaging sheet
+    my $md_spl = 7;#colu no. to add primers or validated columns to mostdamaging sheet
     my $v_spl = 10; #column no. to add uniprot/cdd domain info to variant sheets
     if (exists $search_handles{et}){
         splice (@{$h{Variants}}, -7, 0, "EvolutionaryTraceScore"); 
