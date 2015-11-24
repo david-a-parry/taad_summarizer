@@ -838,6 +838,19 @@ sub getFileLengthFromIndex{
     return $idx{last_line};
 }
 
+=item B<openVcf>
+
+Convenience method to return a filehandle for reading a VCF. Requires a filename as the only input. If the filename ends in '.bgz' or '.gz' it will be opened via IO::Uncompress::Gunzip.
+
+ my $FH = VcfReader::openVcf('file.vcf');
+
+=cut
+
+sub openVcf{
+    my $vcf = shift;
+    croak "openVcf method requires a filename as an argument" if not $vcf;
+    return _openFileHandle($vcf);
+}
 
 sub _openFileHandle{
     my $vcf = shift;
@@ -892,6 +905,23 @@ sub getVariantField{
     return $split->[$vcf_fields{$field}];
 }
 
+=item B<getMultipleVariantFields>
+
+Retrieves the value for given fields from a given line. The first value passed should be an array reference to a split line and the remaining values should be the names of fields to retrieve (e.g. CHROM, POS, ID, REF, ALT, QUAL, FILTER, INFO, FORMAT). 
+ 
+ my ($QUAL, INFO) = VcfReader::getMultipleVariantFields(\@split_line, 'QUAL', 'INFO');
+
+
+=cut
+sub getMultipleVariantFields{
+    my $split = shift;
+    my @values = ();
+    while (my $field = shift){
+        push @values, getVariantField($split, $field); 
+    }
+    return @values;
+}
+ 
 =item B<getVariantInfoField>
 
 Retrieves the value for a given INFO field from a given line. Returns the value of the INFO field if found and the INFO field has a value, returns 1 if the INFO field is found and is a flag and returns nothing if the INFO field is not found. The first value passed should be an array reference to a split line and the second should be the name of the INFO field to retrieve.
@@ -1052,7 +1082,7 @@ sub getVariantFormatFields{
         $format_fields{$f} = $i++;
     }
     return %format_fields if wantarray;
-    return keys @form if defined wantarray;
+    return @form if defined wantarray;
     carp "getVariantFormatFields method called in void context ";
 }
 
@@ -1776,7 +1806,9 @@ sub getSampleAlleleDepths{
                     field  => 'AD',
                     column => $col,
             );
+        if (defined $ad){
             @ad = split(",", $ad);
+        }
     }elsif(defined $var_format{RO} and defined $var_format{AO}){ 
 #freebayes observation counts
         
@@ -2599,11 +2631,25 @@ sub sortVariants{
 }
 
 
+=item B<sortByPos>
+
+Sort method to sort variants by position only (useful if you have an array of variants from a single contig).
+
+ @var = VcfReader::sortByPos(\@var);
+
+=cut
+
+sub sortByPos{
+    my $vars = shift;
+    return sort { getVariantField($a, "POS") <=> getVariantField($b, "POS") } @$vars;
+}
+    
+
 =item B<byContigs>
 
 Sort method to sort contigs on a generic order. Contigs will be ordered numerically, then X, Y and MT and any other contigs will be ordered ascibetically.
 
- my @contigs = sort byContigs @contigs;
+ my @contigs = sort VcfReader::byContigs @contigs;
 
 =cut
 sub byContigs{
@@ -3572,27 +3618,41 @@ sub altsToVepAllele{
 sub _altToVep{
     my ($alt_array, $ref) = @_;
     my @vep_alleles = ();
-    my $is_snv_or_mnv = 0;
+    my $start_differs = 0;
     my $is_indel = 0; 
+    my $is_snv = 0;
+    my $is_mnv = 0;
     foreach my $alt (@$alt_array){
-        if (length($alt) == length($ref)){
-            $is_snv_or_mnv++;
+        next if $alt eq '*';
+        if (length($alt) == 1 and length($ref) == 1){
+            $is_snv = 1;
+        }elsif (length($alt) == length($ref) ){
+            $is_mnv++;
         }else{
             $is_indel++;
         }
     }
-    if ($is_snv_or_mnv and $is_indel){
+    if ($is_snv or ($is_mnv and not $is_indel) ){
         #in this situation VEP does not trim any variant alleles
         foreach my $alt (@$alt_array){
             push @vep_alleles, $alt;
         }
     }else{
+        my $refstart = substr($ref, 0, 1); 
         foreach my $alt (@$alt_array){
-            if (length($alt) == length($ref)){
-                push @vep_alleles,  $alt;
-            }elsif(length($alt) > length($ref)){#insertion - VEP trims first base
-                push @vep_alleles,  substr($alt, 1);
-            }else{#deletion - VEP trims first base or gives '-' if ALT is only 1 nt long
+            next if $alt eq '*';
+            my $altstart = substr($alt, 0, 1); 
+            if ($altstart ne $refstart){
+                $start_differs++; 
+                last;
+            }
+        }
+        foreach my $alt (@$alt_array){
+            if ($alt eq '*'){
+                push @vep_alleles, $alt;
+            }elsif ($start_differs){#no trimming if the first base differs for any ALT
+                push @vep_alleles, $alt;
+            }else{#VEP trims first base or gives '-' if ALT is only 1 nt long
                 if (length($alt) > 1){
                     push @vep_alleles,  substr($alt, 1);
                 }else{
@@ -3604,7 +3664,150 @@ sub _altToVep{
     return @vep_alleles;
 }
 
+=head2 SnpEff Utilities
 
+=item B<readSnpEffHeader>
+
+Reads the header of a VCF and returns a hash of SnpEff consequence fields to their index in output. Only 'ANN' annotations are supported, not old style 'EFF' annotations.
+
+Arguments
+
+=over 16
+
+=item vcf
+
+File name of VCF file to search. This argument or 'header' argument is required.
+
+=item header
+
+Header string or an array of header lines in the same order they appear in a file. Ignored if using 'vcf' argument.
+
+=back 
+
+
+ my %snpeff_header = VcfReader::readSnpEffHeader(vcf => 'file.vcf');
+ 
+ my %snpeff_header = VcfReader::readSnpEffHeader(header => \@header);
+
+=cut
+
+sub readSnpEffHeader{
+    my (%args) = @_;
+    croak "Invalid header " if not checkHeader(%args);
+    my %snpeff_fields = ();
+    my @header = ();
+    if ($args{vcf}){
+        @header = getHeader($args{vcf});
+    }elsif($args{header}){
+        if (ref $args{header} eq 'ARRAY'){
+            @header = @{$args{header}};
+        }else{
+            @header = split("\n", $args{header});
+        }
+    }
+
+    my @info = grep{/^##INFO=<ID=ANN/} @header;
+    if (not @info){
+        croak "Method 'readSnpEffHeader' requires ANN INFO field in meta header (e.g. '##INFO=<ID=ANN,Number...') but no matching lines found ";
+    }
+    carp "Warning - multiple ANN fields found, ignoring all but the most recent field " if @info > 1;
+   my $csq_line = $info[-1] ;#assume last applied SnpEff consequences are what we are looking for 
+   my @csq_fields = ();    
+   if ($csq_line =~ /Description="Functional annotations: '(.+)' ">/){
+       @csq_fields = split(/\s+\|\s+/, $1);
+   }else{
+       croak "Method 'readSnpEffHeader' couldn't properly read the ANN format from the corresponding INFO line: $csq_line ";
+   }
+   if (not @csq_fields){
+       croak "Method 'readSnpEffHeader' didn't find any SnpEff fields from the corresponding ANN INFO line: $csq_line ";
+   }
+   for (my $i = 0; $i < @csq_fields; $i++){
+       $snpeff_fields{lc($csq_fields[$i])} = $i;
+   }
+    return %snpeff_fields;
+}
+
+=item B<getSnpEffFields>
+
+Reads a VEP annotated VCF record and returns the annotations corresponding to either a single or multiple fields as an array or array of hashes respectively. 
+
+Arguments
+
+=over 16
+
+=item line
+
+Array reference to a split line to be passed as the first argument. Required.
+
+=item snpeff_header
+
+Reference to a hash of ANN fields to their index in the output as retrieved using the 'readSnpEffHeader' method. Required.
+
+=item field
+
+Name of an ANN field to retrieve or an array reference to the names of several ANN fields to retrieve. Can also use 'all' to retrieve all ANN fields. Required.
+
+
+=back 
+
+
+ my %snpeff_header = VcfReader::readSnpEffHeader(header => \@header);
+ my @all_genes  = VcfReader::getSnpEffFields
+ (
+    line          => \@split_line,
+    snpeff_header => \%snpeff_header,
+    field         => 'gene',
+ );
+    
+
+ my @all_snpeff = VcfReader::getSnpEffFields
+ (
+    line          => \@split_line,
+    snpeff_header => \%snpeff_header,
+    field         => 'all',
+ );
+
+=cut
+
+sub getSnpEffFields{
+    my (%args) = @_;
+    foreach my $ar (qw / line snpeff_header field / ){
+        croak "Argument $ar is required for getSnpEffFields method.\n" if not exists $args{$ar};
+    }
+    croak "line argument must be an array reference " if ref $args{line} ne 'ARRAY';
+    croak "snpeff_header argument must be a hash reference " if ref $args{snpeff_header} ne 'HASH';
+    my @return;
+    my @fields = ();
+    my $inf_csq = getVariantInfoField($args{line}, 'ANN');
+    croak "No ANN field found in INFO field for line " . join("\t", @{$args{line}}) . "\n" if not $inf_csq;
+    my @csqs = split(",", $inf_csq);
+    foreach my $c (@csqs){#foreach feature (e.g. transcript) 
+        my %t_csq = ();
+        my @v = split(/[\|]/, $c);
+        if (ref $args{field} eq 'ARRAY'){
+            @fields =  @{$args{field}};
+        }elsif (lc($args{field}) eq 'all'){
+            @fields = keys %{$args{snpeff_header}};
+        }else{#if a single field we return an array of values, not hash refs
+            if (not exists $args{snpeff_header} -> {lc($args{field})}){
+                carp "$args{field} feature does not exist in ANN field ";
+            }else{
+                 push @return, $v[ $args{snpeff_header} -> {lc($args{field})} ];
+                 next;
+            }
+        }
+        foreach my $f (@fields){#for multiple fields we return an array of hash refs
+            if (not exists $args{snpeff_header} -> {lc($f)}){
+                carp "$f feature does not exist in ANN field ";
+                next;
+            }
+            $t_csq{lc$f} = $v[ $args{snpeff_header} -> {lc($f)} ];
+        }
+        push @return, \%t_csq;
+    }
+    return @return;
+}
+ 
 =cut
 
 
@@ -3619,4 +3822,4 @@ Copyright 2014, 2015  David A. Parry
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 =cut
-
+1;
