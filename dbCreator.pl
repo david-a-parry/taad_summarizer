@@ -446,14 +446,14 @@ sub genomicPosFromEnsp{
     if (keys %grch37_pos > 1){
         informUser(
             "WARNING: More than one set of genomic positions found for ".
-            " $args{id} $args{start}-$args{end} for GRCh37. Found :\n".
+            join ("/", @{$args{ids}} ) . " $args{start}-$args{end} for GRCh37. Found :\n".
             join("\n", keys %grch37_pos) . "\n"
         );
     }
     if (keys %grch38_pos > 1){
         informUser(
             "WARNING: More than one set of genomic positions found for ".
-            " $args{id} $args{start}-$args{end} for GRCh38. Found :\n".
+            join ("/", @{$args{ids}} ) . " $args{start}-$args{end} for GRCh38. Found :\n".
             join("\n", keys %grch38_pos) . "\n"
         );
     }
