@@ -28,31 +28,32 @@ my %seq_cache = ();
 my %opts = (b => \@allele_balance);
 GetOptions(
     \%opts,
-    'i|input=s',        #vcf input
-    'o|output=s',       #xlsx output
-    'n|no_blanks',      #no blank samples
-    'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
-    't|transcript_database=s',  #optional sqlite database of transcripts and protein info 
-    'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
-    'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
-    'd|depth=i',         #optional min depth for sample call
-    'a|allele_cutoff=f', #remove if allele is present in this proportion or more calls
-    'y|frequency=f',     #filter on this allele frequency if dbSNP/EVS/ExAC annot. found
-    'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
-    'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
-    'g|gq=f',            #min GQ quality for calls
-    'pl=f',              #PL score cutoff for REF genotype
-    's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
-    'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
-    'rules=s',        #optional tsv file of mutation rules
-    'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
-    'validations_file=s', #csv file of validation status of variants
-    'p|progress',       #show a progress bar?
-    'x|do_not_merge',    #do not merge cells
     '1|single_sheet',
-    'verbose',        #print extra progress information
+    'a|allele_cutoff=f', #remove if allele is present in this proportion or more calls
+    'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
+    'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
+    'd|depth=i',         #optional min depth for sample call
+    'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
+    'g|gq=f',            #min GQ quality for calls
     'h|?|help',
+    'i|input=s',        #vcf input
     'manual',
+    'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
+    'n|no_blanks',      #no blank samples
+    'o|output=s',       #xlsx output
+    'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
+    'pl=f',              #PL score cutoff for REF genotype
+    'primer_file=s',      #read a tab delimited file of primers and coordinates to assign primer IDs to variants
+    'p|progress',       #show a progress bar?
+    'rules=s',        #optional tsv file of mutation rules
+    'r|rest_server=s',   #URL of REST server to use if not the default (http://grch37.rest.ensembl.org)
+    's|scan_gxy',       #scan for GXY sequences throughout sequence rather than relying on VEP annotation
+    't|transcript_database=s',  #optional sqlite database of transcripts and protein info 
+    'validations_file=s', #csv file of validation status of variants
+    'verbose',        #print extra progress information
+    'x|do_not_merge',    #do not merge cells
+    'y|frequency=f',     #filter on this allele frequency if dbSNP/EVS/ExAC annot. found
+    'z|reports_folder=s', #create per sample reports and put them in this folder
 ) or pod2usage(-exitval => 2, -message => "Syntax error.\n"); 
 
 pod2usage( -verbose => 1 ) if $opts{h};
