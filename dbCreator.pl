@@ -59,6 +59,7 @@ my %transcript_ranks = (); #key is gene, value is hash of transcript IDs to scor
 my %transcript_xref = (); #key is transcript ID, values are hashes of databases and respective IDs
 my %uniprot_info = (); 
 my %uniprot_to_genename = ();
+my %uniprot_to_ensp = ();
 my %enst_to_uniprot = ();
 
 if ($opts{l}){
@@ -153,6 +154,12 @@ sub parseCddFeats{
             my @coords = sort { $a <=> $b } 
                          map { s/^[A-Z]+//g; $_ } 
                          split(/[\,\-]/, $s[3]);
+            my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+            (
+                ids   => $uniprot_to_ensp{$u},
+                start => $coords[0],
+                end   => $coords[-1],
+            ); 
             my @values = (
                 $u,
                 $name, 
@@ -161,6 +168,8 @@ sub parseCddFeats{
                 $s[3],
                 $coords[0],
                 $coords[-1],
+                $grch37_pos, 
+                $grch38_pos, 
             ) ;
             $n += addRow($insth, \@values, $selth);
             if ($n == $max_commit ){
@@ -195,7 +204,12 @@ sub parseCddHits{
         if ($s[0] =~ /Q\#\d+ - (\S+)/){
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
-
+            my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+            (
+                ids   => $uniprot_to_ensp{$u},
+                start => $s[3],
+                end   => $s[4],
+            ); 
             my @values = (
                 $u,
                 $name, 
@@ -204,6 +218,8 @@ sub parseCddHits{
                 undef,
                 $s[3],
                 $s[4],
+                $grch37_pos, 
+                $grch38_pos, 
             ) ;
             $n += addRow($insth, \@values, $selth);
             if ($n == $max_commit ){
@@ -230,6 +246,8 @@ sub retrieveAndOutputCddInfo{
                  Residues 
                  Start 
                  End
+                 GRCh37Pos   
+                 GRCh38Pos  
                  /; 
     my %f_to_prop = ( 
                  UniprotId   => "TEXT not null",  
@@ -239,6 +257,8 @@ sub retrieveAndOutputCddInfo{
                  Residues    => "TEXT",
                  Start       => "INT not null",
                  End       => "INT not null",
+                 GRCh37Pos   => "TEXT",
+                 GRCh38Pos   => "TEXT",
                  );
     createTable('cdd', \@fields, \%f_to_prop);
     informUser("Adding data retrieved from CDD to 'cdd' table of $opts{d}.\n");
@@ -334,15 +354,20 @@ sub outputUniprotInfo{
                 End
                 Feature
                 Note
+                GRCh37Pos
+                GRCh38Pos
                 /; 
-    my %f_to_prop = ( 
-                GeneName    => "TEXT",
-                UniprotId   => "TEXT",
-                Start		=> "INT not null",
-                End		    => "INT not null",
-                Feature		=> "TEXT not null",
-                Note		=> "TEXT",
-                 );
+    my %f_to_prop = 
+    ( 
+        GeneName    => "TEXT",
+        UniprotId   => "TEXT",
+        Start		=> "INT not null",
+        End		    => "INT not null",
+        Feature		=> "TEXT not null",
+        Note		=> "TEXT",
+        GRCh37Pos   => "TEXT",
+        GRCh38Pos   => "TEXT",
+    );
     createTable('uniprot', \@fields, \%f_to_prop);
     my @lol = ();
     my $insert_query = getInsertionQuery("uniprot", \@fields); 
@@ -358,14 +383,23 @@ sub outputUniprotInfo{
             my ($start, $end) = split('-', $k);
             foreach my $f (@{$uniprot_info{$id}->{$k}}){
                 my ($feature, $note) = split(/\|/, $f );
-                my @values = (
-                        $name,
-                        $id,
-                        $start,
-                        $end,
-                        $feature,
-                        $note,
-                    );
+                my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+                (
+                    ids   => $uniprot_to_ensp{$id},
+                    start => $start,
+                    end   => $end,
+                ); 
+                my @values = 
+                (
+                    $name,
+                    $id,
+                    $start,
+                    $end,
+                    $feature,
+                    $note,
+                    $grch37_pos,
+                    $grch38_pos,
+                );
                 $n += addRow($insth, \@values, $selth);
                 if ($n == $max_commit ){
                     $dbh->do('commit');
@@ -376,6 +410,90 @@ sub outputUniprotInfo{
         }
     }
     $dbh->do('commit');
+}
+
+#########################################################
+sub genomicPosFromEnsp{
+    my %args = @_;
+    my (%grch37_pos, %grch38_pos );
+
+    $restQuery->useGRCh37Server(); 
+    foreach my $id (@{$args{ids}}){
+        if (my $regions = getGenomicRegionsFromEnsp
+            (
+                id       => $id,
+                start    => $args{start},
+                end      => $args{end},
+                assembly => 'GRCh37',
+            )
+        ){
+            $grch37_pos{$regions} = undef;
+        }
+    }
+    $restQuery->useDefaultServer(); 
+    foreach my $id (@{$args{ids}}){
+        if (my $regions = getGenomicRegionsFromEnsp
+            (
+                id       => $id,
+                start    => $args{start},
+                end      => $args{end},
+                assembly => 'GRCh38',
+            )
+        ){
+            $grch38_pos{$regions} = undef;
+        }
+    }
+    if (keys %grch37_pos > 1){
+        informUser(
+            "WARNING: More than one set of genomic positions found for ".
+            " $args{id} $args{start}-$args{end} for GRCh37. Found :\n".
+            join("\n", keys %grch37_pos) . "\n"
+        );
+    }
+    if (keys %grch38_pos > 1){
+        informUser(
+            "WARNING: More than one set of genomic positions found for ".
+            " $args{id} $args{start}-$args{end} for GRCh38. Found :\n".
+            join("\n", keys %grch38_pos) . "\n"
+        );
+    }
+    return 
+    (
+        join(";", keys %grch37_pos), 
+        join(";", keys %grch38_pos), 
+    );
+}
+
+#########################################################
+sub getGenomicRegionsFromEnsp{
+    my %args = @_;
+    my @pos = (); 
+    my $coords = $restQuery->proteinPosToGenomicPos(%args);
+    if (not exists $coords->{mappings} or 
+        ref $coords->{mappings} ne 'ARRAY'){
+        informUser("WARNING: Could not map genomic coordinates ".
+                   "for $args{id} $args{start}-$args{end} - server ".
+                   "did not return an ARRAY reference.\n"
+        );
+    }else{
+        foreach my $mapping (@{$coords->{mappings}}){
+            if ($mapping->{assembly_name} ne $args{assembly}){
+                informUser("WARNING: Unexpected assembly name (".
+                           $mapping->{assembly_name} . ") for coordinates ".
+                           "retrieved for $args{id} $args{start}-$args{end}. ".
+                           "Expected assembly '$args{assembly}'.\n"
+                );
+            }else{
+                my $reg = sprintf("%s:%s-%s",
+                                  $mapping->{seq_region_name},
+                                  $mapping->{start},
+                                  $mapping->{end},
+                ); 
+                push @pos, $reg;
+            }
+        }
+    }
+    return join(";", @pos);
 }
 
 #########################################################
@@ -643,6 +761,7 @@ sub getUniprotData{
                     if ($enst->{Translation}->{length} == $length){
                         $matched_length++;
                         $enst_to_uniprot{$enst->{id}} = $id;
+                        push @{$uniprot_to_ensp{$id}},  $enst->{Translation}->{id};
                         informUser(
 "WARNING: Could not identify Ensembl transcript for canonical isoform of $id " .
 "- basing match of $enst->{id} on basis of shared translation length.\n");
@@ -656,6 +775,10 @@ sub getUniprotData{
     }
     foreach my $t (@t){
         $enst_to_uniprot{$t} = $id;
+        my @ensts = grep { $_->{id} eq $t } @{$ensg_ts->{Transcript}}; 
+        if (@ensts){
+            push @{$uniprot_to_ensp{$id}},  map { $_->{Translation}->{id} }  @ensts;
+        }
     }
     $uniprot_info{$id} = parseUniprotGff($gff);
     $uniprot_to_genename{$id} = $name;
