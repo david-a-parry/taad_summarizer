@@ -15,6 +15,7 @@ use FindBin;
 use lib "$FindBin::Bin/lib/vcfhacks/lib";
 use IdParser;
 use EnsemblRestQuery;
+use VcfReader;
 
 my @gene_ids = ();
 my %opts = ( i => \@gene_ids);
@@ -25,6 +26,8 @@ GetOptions(
     'd|db=s', #sqlite database output
     's|species=s',
     'e|et_folder=s',#optional evolutionary trace folder containing protein predictions
+    'm|hgmd=s', #optional HGMD VEP annotated VCF for creation of HGMD variant table
+    'a|assembly=s', #optional - specify assembly for HGMD consequences - default = GRCh37
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
@@ -34,6 +37,7 @@ usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not 
 usage("Error: please specify a filename for your database using the --db option!\n") 
     if not $opts{d};
 $opts{s} = "human" if not $opts{s};
+$opts{a} = "GRCh37" if not $opts{a};
 
 
 #set up database
@@ -76,6 +80,8 @@ rankTranscriptsAndCrossRef();
 
 outputTranscriptInfo();
 
+outputHgmdInfo();
+
 outputEvolutionaryTraceInfo();
 
 outputUniprotInfo() ; 
@@ -83,6 +89,136 @@ outputUniprotInfo() ;
 retrieveAndOutputCddInfo() ; 
 
 $dbh->disconnect(); 
+
+#########################################################
+sub outputHgmdInfo{
+    return if not $opts{m};
+    my $FH = VcfReader::openVcf($opts{m}); 
+    my @vhead = VcfReader::getHeader($opts{m});
+    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
+    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
+    my @hgmd_fields =  qw /
+            hgmd_id
+            disease
+            variant_class
+            gene_symbol
+            hgvs
+    /;
+   
+    my @get_vep =  qw /
+            symbol
+            gene
+            consequence
+            allele
+            feature
+            hgvsc
+            hgvsp
+            exon
+            intron
+            cdna_position
+            cds_position
+            amino_acids
+            protein_position
+            lof
+            lof_filter
+            lof_info
+            lof_flags
+      /;
+
+    my @fields = qw /
+                feature
+                hgmd_id
+                disease
+                variant_class
+                gene_symbol
+                hgvs
+                assembly           
+                chrom              
+                pos
+                ref                
+                alt                
+                id             
+                consequence 
+                cdna_position
+                cds_position
+                protein_position
+                amino_acids
+                hgvsc              
+                hgvsp              
+                lof
+                lof_filter
+                lof_info
+                lof_flags
+    /;
+    my %f_to_prop = ( 
+                feature             => "TEXT not null",
+                assembly            => "TEXT not null",
+                chrom               => "TEXT not null",
+                pos                 => "INT not null",
+                ref                 => "TEXT not null",
+                alt                 => "TEXT not null",
+                id                  => "TEXT",
+                consequence         => "TEXT not null",
+                cdna_position       => "int",
+                cds_position        => "int",
+                protein_position    => "int",
+                amino_acids         => "TEXT",
+                hgvsc               => "TEXT",
+                hgvsp               => "TEXT",
+                lof                 => "TEXT",
+                lof_filter          => "TEXT",
+                lof_info            => "TEXT",
+                lof_flags           => "TEXT",
+    );
+    createTable('HGMD_VEP', \@fields, \%f_to_prop);
+    informUser("Adding local HGMD data to 'HGMD_VEP' table of $opts{d}.\n");
+    my $insert_query = getInsertionQuery("HGMD_VEP", \@fields); 
+    my $select_query = getSelectQuery("HGMD_VEP", \@fields); 
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
+    $dbh->do('begin');
+    my $n = 0;
+    while (my $l = <$FH>){
+        next if $l =~ /^#/;
+        my %var_fields = (assembly => $opts{a}); 
+        my @split = split("\t", $l);
+        #COLLECT VCF FIELDS (CHROM POS etc)
+        foreach my $f (qw /chrom pos ref alt id / ){ 
+            $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
+        }
+        #GET HGMD ANNOTATIONS FROM INFO FIELD
+        foreach my $f (@hgmd_fields){
+            $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
+        } 
+        my @vep_csq = VcfReader::getVepFields
+        (
+            line       => \@split,
+            vep_header => \%vep_fields,
+            field      => \@get_vep,
+        );
+        #we shouldn't have multiallelic sites in our HGMD VCF (right?)
+        # - so no need to check alleles in VEP CSQ
+        foreach my $csq (@vep_csq){ 
+            next if not $csq->{gene};
+            next if not (exists $transcript_ranks{$csq->{gene}});
+            next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
+            my %fields_for_csq = %var_fields; 
+            #TODO ADD VEP FIELDS
+            foreach my $f (@get_vep){
+                $fields_for_csq{$f} = $csq->{$f};
+            }
+            my @values = map { $fields_for_csq{$_} } @fields;
+            $n += addRow($insth, \@values);
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
+        }
+    }
+    $dbh->do('commit');
+}
+
 
 
 #########################################################
