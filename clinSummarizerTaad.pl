@@ -18,7 +18,7 @@ use Tabix;
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use HTTP::Tiny;
 use JSON;
-use lib "$FindBin::Bin/lib";
+use lib "$FindBin::Bin/lib/vcfhacks/lib";
 use VcfReader;
 use TextToExcel;
 

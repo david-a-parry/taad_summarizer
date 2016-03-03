@@ -12,7 +12,7 @@ use POSIX qw/strftime/;
 use HTTP::Tiny;
 use URI::Encode qw (uri_decode);
 use FindBin;
-use lib "$FindBin::Bin/lib";
+use lib "$FindBin::Bin/lib/vcfhacks/lib";
 use IdParser;
 use EnsemblRestQuery;
 
