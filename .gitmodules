@@ -1,0 +1,3 @@
+[submodule "lib/vcfhacks"]
+	path = lib/vcfhacks
+	url = https://github.com/gantzgraf/vcfhacks.git
