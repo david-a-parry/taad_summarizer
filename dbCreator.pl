@@ -81,6 +81,8 @@ rankTranscriptsAndCrossRef();
 
 outputTranscriptInfo();
 
+outputClinvarInfo();
+
 outputHgmdInfo();
 
 outputEvolutionaryTraceInfo();
@@ -298,16 +300,16 @@ sub outputClinvarInfo{
     my %f_to_prop = ( 
                 feature               => "TEXT not null",
                 measureset_id         => "TEXT not null",
-                symbol                => "TEXT not null",
-                clinical_significance => "TEXT not null", 
-                review_status         => "TEXT not null",
-                hgvs_c                => "TEXT not null",
-                hgvs_p                => "TEXT not null",
-                all_submitters        => "TEXT not null",
-                all_traits            => "TEXT not null",
-                all_pmids             => "TEXT not null",
-                pathogenic            => "TEXT not null",
-                conflicted            => "TEXT not null", 
+                symbol                => "TEXT",
+                clinical_significance => "TEXT", 
+                review_status         => "TEXT",
+                hgvs_c                => "TEXT",
+                hgvs_p                => "TEXT",
+                all_submitters        => "TEXT",
+                all_traits            => "TEXT",
+                all_pmids             => "TEXT",
+                pathogenic            => "INT not null",
+                conflicted            => "INT not null", 
                 assembly              => "TEXT not null",
                 chrom                 => "TEXT not null",
                 pos                   => "INT not null",
