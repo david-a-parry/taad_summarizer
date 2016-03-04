@@ -152,6 +152,11 @@ sub outputHgmdInfo{
     /;
     my %f_to_prop = ( 
                 feature             => "TEXT not null",
+                hgmd_id             => "TEXT",
+                disease             => "TEXT",
+                variant_class       => "TEXT",
+                gene_symbol         => "TEXT",
+                hgvs                => "TEXT",
                 assembly            => "TEXT not null",
                 chrom               => "TEXT not null",
                 pos                 => "INT not null",
@@ -170,8 +175,8 @@ sub outputHgmdInfo{
                 lof_info            => "TEXT",
                 lof_flags           => "TEXT",
     );
-    createTable('HGMD_VEP', \@fields, \%f_to_prop);
     informUser("Adding local HGMD data to 'HGMD_VEP' table of $opts{d}.\n");
+    createTable('HGMD_VEP', \@fields, \%f_to_prop);
     my $insert_query = getInsertionQuery("HGMD_VEP", \@fields); 
     my $select_query = getSelectQuery("HGMD_VEP", \@fields); 
     my $insth= $dbh->prepare( $insert_query );
@@ -553,6 +558,11 @@ sub genomicPosFromEnsp{
     my %args = @_;
     my (%grch37_pos, %grch38_pos );
 
+    informUser
+    (
+        "Mapping GRCh37 and GRCh38 coordinates from protein positons ".
+        "$args{start}-$args{end} for $id...\n"
+    );
     $restQuery->useGRCh37Server(); 
     foreach my $id (@{$args{ids}}){
         if (my $regions = getGenomicRegionsFromEnsp
@@ -888,7 +898,7 @@ sub getUniprotData{
         ."Tried URL: $url\nExiting\n" unless $gff;
     # below collects only the transcript that code for
     # the canonical uniprot isoform.
-    my ($name, $length, @t)  = parseUniprotFlat($txt);
+    my ($name, $length, @t)  = parseUniprotFlat($txt, $id);
     if (not @t){
         my $matched_length = 0;
         if ($length){
@@ -923,30 +933,37 @@ sub getUniprotData{
 #########################################################
 sub parseUniprotFlat{
     my $txt = shift;
+    my $u_id = shift;
     my @lines = split("\n", $txt);
     my $canonical; 
     my $name = '';
     my $u_length = 0;
     my @transcripts = ();
-    foreach my $l (@lines){
-        if ($l =~ /^ID\s+\S+\s+.*\s(\d+)\s+AA\./){
+    for (my $i = 0; $i < @lines; $i++){
+        if ($lines[$i] =~ /^ID\s+\S+\s+.*\s(\d+)\s+AA\./){
             $u_length = $1;
             next;
         }
-        if ($l =~ /^GN\s+Name=(\S+);/){
+        if ($lines[$i] =~ /^GN\s+Name=(\S+);/){
             $name = $1;
             next;
         }
-        if ($l =~ /^CC\s+IsoId=(\S+);\s+Sequence=Displayed;/){
-            $canonical = $1;
-            next;
+        if ($lines[$i] =~ /^CC\s+IsoId=((\S+)(,\s+\S+)*);/ ){
+            my @iso_ids = split(/\,\s+/, $1);
+            if ($lines[$i] =~ /^CC\s+IsoId=(\S+)(,\s+\S+)*;\s+Sequence=Displayed;/){
+                ($canonical) = grep { $_ =~ /^$u_id-\d+$/ } @iso_ids;
+                next;
+            }elsif($lines[$i + 1] =~ /Sequence=Displayed/){ 
+                ($canonical) = grep { $_ =~ /^$u_id-\d+$/ } @iso_ids;
+                next;
+            }
         }
         if ($canonical){
-            if($l =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+\. \[$canonical\]/){
+            if($lines[$i] =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+\. \[$canonical\]/){
                 push @transcripts, $1;
             }
-        }elsif($l =~ /^DR\s/){#if only one isoform there won't be IsoId's
-            if($l =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+/){
+        }elsif($lines[$i] =~ /^DR\s/){#if only one isoform there won't be IsoId's
+            if($lines[$i] =~ /^DR\s+Ensembl;\s+(ENST\d+);\s+ENSP\d+;\s+ENSG\d+/){
                 push @transcripts, $1;
                 
             }
