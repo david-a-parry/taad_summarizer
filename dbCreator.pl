@@ -27,6 +27,7 @@ GetOptions(
     's|species=s',
     'e|et_folder=s',#optional evolutionary trace folder containing protein predictions
     'm|hgmd=s', #optional HGMD VEP annotated VCF for creation of HGMD variant table
+    'c|clinvar=s', #optional ClinVar VEP annotated VCF for creation of ClinVar variant table
     'a|assembly=s', #optional - specify assembly for HGMD consequences - default = GRCh37
     'q|quiet',
     'h|?|help',
@@ -223,7 +224,154 @@ sub outputHgmdInfo{
     $dbh->do('commit');
 }
 
+#########################################################
+sub outputClinvarInfo{
+    return if not $opts{c};
+    my $FH = VcfReader::openVcf($opts{c}); 
+    my @vhead = VcfReader::getHeader($opts{c});
+    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
+    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
+    my @clinvar_fields =  qw /
+                measureset_id
+                symbol
+                clinical_significance
+                review_status
+                hgvs_c
+                hgvs_p
+                all_submitters
+                all_traits
+                all_pmids
+                pathogenic
+                conflicted
+    /;
+   
+    my @get_vep =  qw /
+            symbol
+            gene
+            consequence
+            allele
+            feature
+            hgvsc
+            hgvsp
+            exon
+            intron
+            cdna_position
+            cds_position
+            amino_acids
+            protein_position
+            lof
+            lof_filter
+            lof_info
+            lof_flags
+      /;
 
+    my @fields = qw /
+                feature
+                measureset_id
+                symbol
+                clinical_significance
+                review_status
+                hgvs_c
+                hgvs_p
+                all_submitters
+                all_traits
+                all_pmids
+                pathogenic
+                conflicted
+                assembly
+                chrom              
+                pos
+                ref                
+                alt                
+                consequence 
+                cdna_position
+                cds_position
+                protein_position
+                amino_acids
+                hgvsc              
+                hgvsp              
+                lof
+                lof_filter
+                lof_info
+                lof_flags
+    /;
+    my %f_to_prop = ( 
+                feature               => "TEXT not null",
+                measureset_id         => "TEXT not null",
+                symbol                => "TEXT not null",
+                clinical_significance => "TEXT not null", 
+                review_status         => "TEXT not null",
+                hgvs_c                => "TEXT not null",
+                hgvs_p                => "TEXT not null",
+                all_submitters        => "TEXT not null",
+                all_traits            => "TEXT not null",
+                all_pmids             => "TEXT not null",
+                pathogenic            => "TEXT not null",
+                conflicted            => "TEXT not null", 
+                assembly              => "TEXT not null",
+                chrom                 => "TEXT not null",
+                pos                   => "INT not null",
+                ref                   => "TEXT not null",
+                alt                   => "TEXT not null",
+                consequence           => "TEXT not null",
+                cdna_position         => "int",
+                cds_position          => "int",
+                protein_position      => "int",
+                amino_acids           => "TEXT",
+                hgvsc                 => "TEXT",
+                hgvsp                 => "TEXT",
+                lof                   => "TEXT",
+                lof_filter            => "TEXT",
+                lof_info              => "TEXT",
+                lof_flags             => "TEXT",
+    );
+    informUser("Adding local ClinVar data to 'ClinVar_VEP' table of $opts{d}.\n");
+    createTable('ClinVar_VEP', \@fields, \%f_to_prop);
+    my $insert_query = getInsertionQuery("ClinVar_VEP", \@fields); 
+    my $select_query = getSelectQuery("ClinVar_VEP", \@fields); 
+    my $insth= $dbh->prepare( $insert_query );
+    my $selth= $dbh->prepare( $select_query );
+    $dbh->do('begin');
+    my $n = 0;
+    while (my $l = <$FH>){
+        next if $l =~ /^#/;
+        my %var_fields = (assembly => $opts{a}); 
+        my @split = split("\t", $l);
+        #COLLECT VCF FIELDS (CHROM POS etc)
+        foreach my $f (qw /chrom pos ref alt / ){ 
+            $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
+        }
+        #GET ClinVar ANNOTATIONS FROM INFO FIELD
+        foreach my $f (@clinvar_fields){
+            $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
+        } 
+        my @vep_csq = VcfReader::getVepFields
+        (
+            line       => \@split,
+            vep_header => \%vep_fields,
+            field      => \@get_vep,
+        );
+        #we shouldn't have multiallelic sites in our ClinVar VCF (right?)
+        # - so no need to check alleles in VEP CSQ
+        foreach my $csq (@vep_csq){ 
+            next if not $csq->{gene};
+            next if not (exists $transcript_ranks{$csq->{gene}});
+            next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
+            my %fields_for_csq = %var_fields; 
+            foreach my $f (@get_vep){
+                $fields_for_csq{$f} = $csq->{$f};
+            }
+            my @values = map { $fields_for_csq{$_} } @fields;
+            $n += addRow($insth, \@values);
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
+        }
+    }
+    $dbh->do('commit');
+}
 
 #########################################################
 sub createTable{
