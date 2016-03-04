@@ -708,7 +708,7 @@ sub genomicPosFromEnsp{
     informUser
     (
         "Mapping GRCh37 and GRCh38 coordinates from protein positons ".
-        "$args{start}-$args{end} for $id...\n"
+        "$args{start}-$args{end} for ". join(",", @{$args{ids}}) . "...\n"
     );
     $restQuery->useGRCh37Server(); 
     foreach my $id (@{$args{ids}}){
