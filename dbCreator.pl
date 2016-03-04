@@ -208,7 +208,6 @@ sub outputHgmdInfo{
             next if not (exists $transcript_ranks{$csq->{gene}});
             next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
             my %fields_for_csq = %var_fields; 
-            #TODO ADD VEP FIELDS
             foreach my $f (@get_vep){
                 $fields_for_csq{$f} = $csq->{$f};
             }
