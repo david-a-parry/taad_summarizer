@@ -66,6 +66,8 @@ my %uniprot_info = ();
 my %uniprot_to_genename = ();
 my %uniprot_to_ensp = ();
 my %enst_to_uniprot = ();
+my %mappings = (); #protein pos mappings to prevent redundant lookups
+                #key = protein id -> assembly -> start -> end = coordinate 
 
 if ($opts{l}){
     push @gene_ids, readList();
@@ -706,7 +708,6 @@ sub outputUniprotInfo{
 sub genomicPosFromEnsp{
     my %args = @_;
     my (%grch37_pos, %grch38_pos );
-
     informUser
     (
         "Mapping GRCh37 and GRCh38 coordinates from protein positons ".
@@ -714,7 +715,10 @@ sub genomicPosFromEnsp{
     );
     $restQuery->useGRCh37Server(); 
     foreach my $id (@{$args{ids}}){
-        if (my $regions = getGenomicRegionsFromEnsp
+        if (exists $mappings{$id}->{GRCh37}->{$args{start}}->{$args{end}}){
+            my $regions = $mappings{$id}->{GRCh37}->{$args{start}}->{$args{end}};
+            $grch37_pos{$regions} = undef;
+        }elsif (my $regions = getGenomicRegionsFromEnsp
             (
                 id       => $id,
                 start    => $args{start},
@@ -723,11 +727,15 @@ sub genomicPosFromEnsp{
             )
         ){
             $grch37_pos{$regions} = undef;
+            $mappings{$id}->{GRCh37}->{$args{start}}->{$args{end}} = $regions;
         }
     }
     $restQuery->useDefaultServer(); 
     foreach my $id (@{$args{ids}}){
-        if (my $regions = getGenomicRegionsFromEnsp
+        if (exists $mappings{$id}->{GRCh38}->{$args{start}}->{$args{end}}){
+            my $regions = $mappings{$id}->{GRCh38}->{$args{start}}->{$args{end}};
+            $grch38_pos{$regions} = undef;
+        }elsif (my $regions = getGenomicRegionsFromEnsp
             (
                 id       => $id,
                 start    => $args{start},
@@ -736,6 +744,7 @@ sub genomicPosFromEnsp{
             )
         ){
             $grch38_pos{$regions} = undef;
+            $mappings{$id}->{GRCh38}->{$args{start}}->{$args{end}} = $regions;
         }
     }
     if (keys %grch37_pos > 1){
@@ -1183,6 +1192,7 @@ sub getGenesFromIds{
             informUser("Identifying Ensembl gene via gene cross-reference...\n");
             my $gene = $restQuery->getGeneViaXreg($g, $opts{s});
             if (ref $gene eq 'ARRAY'){
+                #TODO - go through each item to see if it matches the display-name
                 if ($gene->[0]->{id}){
                     $gene_hash = $restQuery->lookUpEnsId($gene->[0]->{id}, 1);
                 }
