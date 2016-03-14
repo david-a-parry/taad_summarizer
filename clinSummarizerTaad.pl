@@ -226,32 +226,76 @@ sub readTranscriptDatabase{
         cdd     =>  $dbh->prepare 
         (
             qq{ select * FROM cdd 
-            WHERE UniprotId == ? 
-            and End >= ? 
-            and Start <= ? 
+                WHERE UniprotId == ? 
+                and End >= ? 
+                and Start <= ? 
             } 
         ),
         uniprot =>  $dbh->prepare 
         (
             qq{ select * FROM uniprot 
-            WHERE UniprotId == ? 
-            and End >= ? 
-            and Start <= ? 
+                WHERE UniprotId == ? 
+                and End >= ? 
+                and Start <= ? 
             } 
         ),
     );
+
     if (exists $tables{"\"main\".\"EvolutionaryTrace\""}){
         $search_handles{et} = $dbh->prepare
         (
             qq{ select score FROM EvolutionaryTrace
-            WHERE EnsemblTranscriptID == ? 
-            and Position == ? 
-            and WildTypeResidue == ? 
-            and MutantResidue == ? 
+                WHERE EnsemblTranscriptID == ? 
+                and Position == ? 
+                and WildTypeResidue == ? 
+                and MutantResidue == ? 
+            }
+        );
+    }
+
+    if (exists $tables{"\"main\".\"HGMD_VEP\""}){
+        $search_handles{hgmd_pos} = $dbh->prepare
+        (
+            qq{ select hgmd_id disease variant_class 
+                FROM HGMD_VEP
+                WHERE feature == ? 
+                and chrom == ? 
+                and pos == ? 
+                and ref == ?
+                and alt == ?
+            }
+        );
+        $search_handles{hgmd_aa} = $dbh->prepare
+        (
+            qq{ select * FROM HGMD_VEP
+                WHERE feature == ? 
+                and protein_position == ? 
+            }
+        );
+    }
+
+    if (exists $tables{"\"main\".\"ClinVar_VEP\""}){
+        $search_handles{clinvar_pos} = $dbh->prepare
+        (
+            qq{ select pathogenic conflicted clinical_significance review_status
+                FROM ClinVar_VEP
+                WHERE feature == ? 
+                and chrom == ? 
+                and pos == ? 
+                and ref == ?
+                and alt == ?
+            }
+        );
+        $search_handles{clinvar_aa} = $dbh->prepare
+        (
+            qq{ select * FROM ClinVar_VEP
+                WHERE feature == ? 
+                and protein_position == ? 
             }
         );
     }
 }
+
 ###########################################################
 sub getAfAnnotations{
     my $h = shift;
