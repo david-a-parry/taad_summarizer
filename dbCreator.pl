@@ -129,9 +129,8 @@ sub outputHgmdInfo{
             lof_info
             lof_flags
       /;
-
-    my @fields = qw /
-                feature
+     
+    my @clin_fields = qw /
                 hgmd_id
                 disease
                 variant_class
@@ -143,6 +142,11 @@ sub outputHgmdInfo{
                 ref                
                 alt                
                 id             
+    /;
+
+    my @csq_fields = qw /
+                hgmd_id
+                feature
                 consequence 
                 cdna_position
                 cds_position
@@ -180,12 +184,17 @@ sub outputHgmdInfo{
                 lof_info            => "TEXT",
                 lof_flags           => "TEXT",
     );
-    informUser("Adding local HGMD data to 'HGMD_VEP' table of $opts{d}.\n");
-    createTable('HGMD_VEP', \@fields, \%f_to_prop);
-    my $insert_query = getInsertionQuery("HGMD_VEP", \@fields); 
-    my $select_query = getSelectQuery("HGMD_VEP", \@fields); 
-    my $insth= $dbh->prepare( $insert_query );
-    my $selth= $dbh->prepare( $select_query );
+    informUser("Adding local HGMD data to 'HGMD' and 'HGMD_VEP' table of $opts{d}.\n");
+    createTable('HGMD', \@clin_fields, \%f_to_prop);
+    my $clin_insert_query = getInsertionQuery("HGMD", \@clin_fields); 
+    my $clin_select_query = getSelectQuery("HGMD", \@clin_fields); 
+    my $clin_insth= $dbh->prepare( $clin_insert_query );
+    my $clin_selth= $dbh->prepare( $clin_select_query );
+    createTable('HGMD_VEP', \@csq_fields, \%f_to_prop);
+    my $csq_insert_query = getInsertionQuery("HGMD_VEP", \@csq_fields); 
+    my $csq_select_query = getSelectQuery("HGMD_VEP", \@csq_fields); 
+    my $csq_insth= $dbh->prepare( $csq_insert_query );
+    my $csq_selth= $dbh->prepare( $csq_select_query );
     $dbh->do('begin');
     my $n = 0;
     while (my $l = <$FH>){
@@ -200,6 +209,13 @@ sub outputHgmdInfo{
         foreach my $f (@hgmd_fields){
             $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
         } 
+        my @clin_values = map { $var_fields{$_} } @clin_fields;
+        $n += addRow($clin_insth, \@clin_values);
+        if ($n == $max_commit ){
+            $dbh->do('commit');
+            $dbh->do('begin');
+            $n = 0;
+        }
         my @vep_csq = VcfReader::getVepFields
         (
             line       => \@split,
@@ -212,12 +228,12 @@ sub outputHgmdInfo{
             next if not $csq->{gene};
             next if not (exists $transcript_ranks{$csq->{gene}});
             next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
-            my %fields_for_csq = %var_fields; 
+            my %fields_for_csq = (hgmd_id => $var_fields{hgmd_id});
             foreach my $f (@get_vep){
                 $fields_for_csq{$f} = $csq->{$f};
             }
-            my @values = map { $fields_for_csq{$_} } @fields;
-            $n += addRow($insth, \@values);
+            my @csq_values = map { $fields_for_csq{$_} } @csq_fields;
+            $n += addRow($csq_insth, \@csq_values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -268,9 +284,7 @@ sub outputClinvarInfo{
             lof_info
             lof_flags
       /;
-
-    my @fields = qw /
-                feature
+    my @clin_fields = qw / 
                 measureset_id
                 symbol
                 clinical_significance
@@ -286,7 +300,11 @@ sub outputClinvarInfo{
                 chrom              
                 pos
                 ref                
-                alt                
+                alt 
+    /;
+    my @csq_fields = qw /
+                feature
+                measureset_id
                 consequence 
                 cdna_position
                 cds_position
@@ -329,12 +347,18 @@ sub outputClinvarInfo{
                 lof_info              => "TEXT",
                 lof_flags             => "TEXT",
     );
-    informUser("Adding local ClinVar data to 'ClinVar_VEP' table of $opts{d}.\n");
-    createTable('ClinVar_VEP', \@fields, \%f_to_prop);
-    my $insert_query = getInsertionQuery("ClinVar_VEP", \@fields); 
-    my $select_query = getSelectQuery("ClinVar_VEP", \@fields); 
-    my $insth= $dbh->prepare( $insert_query );
-    my $selth= $dbh->prepare( $select_query );
+    informUser("Adding local ClinVar data to 'ClinVar' and 'ClinVar_VEP' tables of $opts{d}.\n");
+    createTable('ClinVar', \@clin_fields, \%f_to_prop);
+    my $clin_insert_query = getInsertionQuery("ClinVar", \@clin_fields); 
+    my $clin_select_query = getSelectQuery("ClinVar", \@clin_fields); 
+    my $clin_insth= $dbh->prepare( $clin_insert_query );
+    my $clin_selth= $dbh->prepare( $clin_select_query );
+
+    createTable('ClinVar_VEP', \@csq_fields, \%f_to_prop);
+    my $csq_insert_query = getInsertionQuery("ClinVar_VEP", \@csq_fields); 
+    my $csq_select_query = getSelectQuery("ClinVar_VEP", \@csq_fields); 
+    my $csq_insth= $dbh->prepare( $csq_insert_query );
+    my $csq_selth= $dbh->prepare( $csq_select_query );
     $dbh->do('begin');
     my $n = 0;
     while (my $l = <$FH>){
@@ -349,6 +373,13 @@ sub outputClinvarInfo{
         foreach my $f (@clinvar_fields){
             $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
         } 
+        my @clin_values = map { $var_fields{$_} } @clin_fields;
+        $n += addRow($clin_insth, \@clin_values);
+        if ($n == $max_commit ){
+            $dbh->do('commit');
+            $dbh->do('begin');
+            $n = 0;
+        }
         my @vep_csq = VcfReader::getVepFields
         (
             line       => \@split,
@@ -361,12 +392,12 @@ sub outputClinvarInfo{
             next if not $csq->{gene};
             next if not (exists $transcript_ranks{$csq->{gene}});
             next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
-            my %fields_for_csq = %var_fields; 
+            my %fields_for_csq = (measureset_id => $var_fields{measureset_id});
             foreach my $f (@get_vep){
                 $fields_for_csq{$f} = $csq->{$f};
             }
-            my @values = map { $fields_for_csq{$_} } @fields;
-            $n += addRow($insth, \@values);
+            my @csq_values = map { $fields_for_csq{$_} } @csq_fields;
+            $n += addRow($csq_insth, \@csq_values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -1166,6 +1197,7 @@ sub getHttpData{
 sub getGenesFromIds{
     foreach my $g (@gene_ids){
         $parser->parseId($g); 
+        my @lookups = ();
         if (not $opts{q}){
             informUser( "Interpretting ID \"$g\" as of type \"" . $parser->get_identifierType() . "\"...\n");
         }
@@ -1186,24 +1218,56 @@ sub getGenesFromIds{
                     $gene_hash = geneFromEnst($transcript->{id});
                 }
             }else{
-                print STDERR "WARNING: No transcript identified for ID \"$g\"\n";
+                informUser( "WARNING: No transcript identified for ID \"$g\"\n");
             }
         }else{
             informUser("Identifying Ensembl gene via gene cross-reference...\n");
             my $gene = $restQuery->getGeneViaXreg($g, $opts{s});
             if (ref $gene eq 'ARRAY'){
-                #TODO - go through each item to see if it matches the display-name
-                if ($gene->[0]->{id}){
-                    $gene_hash = $restQuery->lookUpEnsId($gene->[0]->{id}, 1);
+                #go through each item to see if it matches the display-name
+                foreach my $ge (@$gene){
+                    if ($ge->{id}){
+                        my $ge_hash = $restQuery->lookUpEnsId($ge->{id}, 1);
+                        if (uc($ge_hash->{display_name}) eq uc($g)){
+                        #if gene symbol matches then we use this entry
+                            $gene_hash = $ge_hash;
+                            last;
+                        }else{
+                            push @lookups, $ge_hash;
+                        }
+                    }
+                }
+                if (not $gene_hash){
+                    if (@lookups == 1){
+                        $gene_hash = $lookups[0];
+                    }
                 }
             }
         }
         if (not $gene_hash){
-            print STDERR "WARNING: Could not identify gene for ID \"$g\"\n";
+            informUser("WARNING: Could not identify gene for ID \"$g\"\n");
+            if (@lookups){
+                my $idstring = join("\n", map { $_->{display_name} } @lookups );
+                informUser
+                (
+                    "Identified the following non-matching display names:\n".
+                    "$idstring\n"
+                );
+            }
         }else{
+            informUser
+            (
+                "Found gene with display name " . 
+                $gene_hash->{display_name} . " and Ensmbl gene ID ".
+                $gene_hash->{id} . " for input '$g'.\n"
+            );
             if (exists $id_mapping{$gene_hash->{id}}){
-                print STDERR "WARNING: Duplicated gene identified: $gene_hash->{id} identified from $g and from ".
-                    join(", ", @{$id_mapping{$gene_hash->{id}}}) . "\n";
+                informUser
+                (
+                    "WARNING: Duplicated gene identified: $gene_hash->{id} ".
+                    "identified from $g and from ".
+                    join(", ", @{$id_mapping{$gene_hash->{id}}}) . "\n"
+                );
             }
             push @{$id_mapping{$gene_hash->{id}}}, $g;
             $genes{$gene_hash->{id}} = $gene_hash;
