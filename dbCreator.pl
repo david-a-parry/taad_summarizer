@@ -201,21 +201,6 @@ sub outputHgmdInfo{
         next if $l =~ /^#/;
         my %var_fields = (assembly => $opts{a}); 
         my @split = split("\t", $l);
-        #COLLECT VCF FIELDS (CHROM POS etc)
-        foreach my $f (qw /chrom pos ref alt id / ){ 
-            $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
-        }
-        #GET HGMD ANNOTATIONS FROM INFO FIELD
-        foreach my $f (@hgmd_fields){
-            $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
-        } 
-        my @clin_values = map { $var_fields{$_} } @clin_fields;
-        $n += addRow($clin_insth, \@clin_values);
-        if ($n == $max_commit ){
-            $dbh->do('commit');
-            $dbh->do('begin');
-            $n = 0;
-        }
         my @vep_csq = VcfReader::getVepFields
         (
             line       => \@split,
@@ -224,16 +209,37 @@ sub outputHgmdInfo{
         );
         #we shouldn't have multiallelic sites in our HGMD VCF (right?)
         # - so no need to check alleles in VEP CSQ
+        my $transcript_found = 0;
         foreach my $csq (@vep_csq){ 
             next if not $csq->{gene};
             next if not (exists $transcript_ranks{$csq->{gene}});
             next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
-            my %fields_for_csq = (hgmd_id => $var_fields{hgmd_id});
+            if (not $transcript_found){
+                #GET HGMD ANNOTATIONS FROM INFO FIELD
+                foreach my $f (@hgmd_fields){
+                    $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
+                }
+                $transcript_found = 1; 
+            }
+            my %fields_for_csq = (hgmd_id => $var_fields{hgmd_id}, assembly => $opts{a});
             foreach my $f (@get_vep){
                 $fields_for_csq{$f} = $csq->{$f};
             }
             my @csq_values = map { $fields_for_csq{$_} } @csq_fields;
             $n += addRow($csq_insth, \@csq_values);
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
+        }
+        if ($transcript_found){
+            #COLLECT VCF FIELDS (CHROM POS etc)
+            foreach my $f (qw /chrom pos ref alt id / ){ 
+                $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
+            }
+            my @clin_values = map { $var_fields{$_} } @clin_fields;
+            $n += addRow($clin_insth, \@clin_values);
             if ($n == $max_commit ){
                 $dbh->do('commit');
                 $dbh->do('begin');
@@ -365,21 +371,6 @@ sub outputClinvarInfo{
         next if $l =~ /^#/;
         my %var_fields = (assembly => $opts{a}); 
         my @split = split("\t", $l);
-        #COLLECT VCF FIELDS (CHROM POS etc)
-        foreach my $f (qw /chrom pos ref alt / ){ 
-            $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
-        }
-        #GET ClinVar ANNOTATIONS FROM INFO FIELD
-        foreach my $f (@clinvar_fields){
-            $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
-        } 
-        my @clin_values = map { $var_fields{$_} } @clin_fields;
-        $n += addRow($clin_insth, \@clin_values);
-        if ($n == $max_commit ){
-            $dbh->do('commit');
-            $dbh->do('begin');
-            $n = 0;
-        }
         my @vep_csq = VcfReader::getVepFields
         (
             line       => \@split,
@@ -388,10 +379,19 @@ sub outputClinvarInfo{
         );
         #we shouldn't have multiallelic sites in our ClinVar VCF (right?)
         # - so no need to check alleles in VEP CSQ
+        my $transcript_found = 0;
         foreach my $csq (@vep_csq){ 
             next if not $csq->{gene};
             next if not (exists $transcript_ranks{$csq->{gene}});
             next if not (exists $transcript_ranks{$csq->{gene}}->{$csq->{feature}});
+            #only collect INFO fields if we haven't already
+            if (not $transcript_found){
+                #GET ClinVar ANNOTATIONS FROM INFO FIELD
+                foreach my $f (@clinvar_fields){
+                    $var_fields{$f} = VcfReader::getVariantInfoField(\@split, $f);
+                } 
+                $transcript_found = 1;
+            }
             my %fields_for_csq = (measureset_id => $var_fields{measureset_id});
             foreach my $f (@get_vep){
                 $fields_for_csq{$f} = $csq->{$f};
@@ -403,6 +403,20 @@ sub outputClinvarInfo{
                 $dbh->do('begin');
                 $n = 0;
             }
+        }
+        if ($transcript_found){
+            #COLLECT VCF FIELDS (CHROM POS etc)
+            foreach my $f (qw /chrom pos ref alt / ){ 
+                $var_fields{$f} =  VcfReader::getVariantField(\@split, uc($f));
+            }
+            my @clin_values = map { $var_fields{$_} } @clin_fields;
+            $n += addRow($clin_insth, \@clin_values);
+            if ($n == $max_commit ){
+                $dbh->do('commit');
+                $dbh->do('begin');
+                $n = 0;
+            }
+       
         }
     }
     $dbh->do('commit');
