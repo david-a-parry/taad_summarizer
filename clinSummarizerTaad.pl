@@ -31,14 +31,12 @@ GetOptions(
     '1|single_sheet',
     'a|allele_cutoff=f', #remove if allele is present in this proportion or more calls
     'b|allele_balance=f{,}', #min and optional max alt allele ratio per sample call
-    'c|clinvar=s',      #optional ClinVar VCF to add ClinVar CLINSIG annotations
     'd|depth=i',         #optional min depth for sample call
     'f|filter_output=s', #optional output file for calls filtered on allele_cutoff
     'g|gq=f',            #min GQ quality for calls
     'h|?|help',
     'i|input=s',        #vcf input
     'manual',
-    'm|hgmd=s',         #vcf of HGMD variations converted with hgmdMartToVcf.pl
     'n|no_blanks',      #no blank samples
     'o|output=s',       #xlsx output
     'phenotype_file=s',   #read a csv file of patient IDs and phenotype information
@@ -59,7 +57,7 @@ GetOptions(
 pod2usage( -verbose => 1 ) if $opts{h};
 pod2usage( -verbose => 2 ) if $opts{manual};
 pod2usage( -exitval => 2, -message => "-i/--input is required" ) if (not $opts{i});
-pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m});
+#pod2usage( -exitval => 2, -message => "-m/--hgmd is required" ) if (not $opts{m});
 if ($opts{rules} and not $opts{t}){
     my $msg = <<EOT
 WARNING: CDD or Uniprot rules will not be used without specifying a transcript database using the -t/--transcript_database option. Only 'coordinate' based rules will be considered.
@@ -104,18 +102,6 @@ if ($opts{phenotype_file}){
     informUser("Checking phenotype file\n");
     ($phenotypes, @pheno_fields) = readPhenotypeFile();
 }
-#check HGMD VCF and retrieve search arguments 
-
-informUser("Checking HGMD vcf\n");
-my %search_args = getSearchArgs();
-
-# check ClinVar TSV file (https://github.com/macarthur-lab/clinvar) 
-# if supplied and retrieve search arguments 
-
-informUser("Checking ClinVar\n");
-my %clinvar_sargs = getClinVarSearchArgs();
-my %clnsig_codes = getClnSigCodes();
-
 #set consequence ranks;
 my %so_ranks = ();
 setConsequenceRanks();
@@ -202,7 +188,7 @@ sub readTranscriptDatabase{
     $dbh = DBI->connect("DBI:$driver:$opts{t}", {RaiseError => 1})
       or die "Could not connect to sqlite database '$opts{t}': " . DBI->errstr . "\n";
     my %tables = map {$_ => undef} $dbh->tables;
-    foreach my $t ( qw / transcripts uniprot cdd / ){
+    foreach my $t ( qw / transcripts uniprot cdd HGMD_VEP ClinVar_VEP/ ){
         if (not exists $tables{"\"main\".\"$t\""}){
             die "ERROR: Could not find table '$t' in $opts{t} - did you use dbCreator.pl to create this database?\n";
         }
@@ -231,6 +217,7 @@ sub readTranscriptDatabase{
                 and Start <= ? 
             } 
         ),
+
         uniprot =>  $dbh->prepare 
         (
             qq{ select * FROM uniprot 
@@ -238,6 +225,45 @@ sub readTranscriptDatabase{
                 and End >= ? 
                 and Start <= ? 
             } 
+        ),
+        
+        hgmd_pos => $dbh->prepare
+        (
+            qq{ select hgmd_id, disease, variant_class, gene_symbol, hgvs 
+                FROM HGMD
+                WHERE chrom == ? 
+                and pos == ? 
+                and ref == ?
+                and alt == ?
+            }
+        ),
+
+        hgmd_aa =>  $dbh->prepare
+        (
+            qq{ select * FROM HGMD_VEP
+                WHERE feature == ? 
+                and protein_position == ? 
+            }
+        ),
+
+        clinvar_pos =>  $dbh->prepare
+        (
+            qq{ select pathogenic, measureset_id, 
+                clinical_significance, conflicted, all_traits 
+                FROM ClinVar
+                WHERE chrom == ? 
+                and pos == ? 
+                and ref == ?
+                and alt == ?
+            }
+        ),
+
+        clinvar_aa =>  $dbh->prepare
+        (
+            qq{ select * FROM ClinVar_VEP
+                WHERE feature == ? 
+                and protein_position == ? 
+            }
         ),
     );
 
@@ -253,47 +279,6 @@ sub readTranscriptDatabase{
         );
     }
 
-    if (exists $tables{"\"main\".\"HGMD_VEP\""}){
-        $search_handles{hgmd_pos} = $dbh->prepare
-        (
-            qq{ select hgmd_id disease variant_class 
-                FROM HGMD_VEP
-                WHERE feature == ? 
-                and chrom == ? 
-                and pos == ? 
-                and ref == ?
-                and alt == ?
-            }
-        );
-        $search_handles{hgmd_aa} = $dbh->prepare
-        (
-            qq{ select * FROM HGMD_VEP
-                WHERE feature == ? 
-                and protein_position == ? 
-            }
-        );
-    }
-
-    if (exists $tables{"\"main\".\"ClinVar_VEP\""}){
-        $search_handles{clinvar_pos} = $dbh->prepare
-        (
-            qq{ select pathogenic conflicted clinical_significance review_status
-                FROM ClinVar_VEP
-                WHERE feature == ? 
-                and chrom == ? 
-                and pos == ? 
-                and ref == ?
-                and alt == ?
-            }
-        );
-        $search_handles{clinvar_aa} = $dbh->prepare
-        (
-            qq{ select * FROM ClinVar_VEP
-                WHERE feature == ? 
-                and protein_position == ? 
-            }
-        );
-    }
 }
 
 ###########################################################
@@ -429,6 +414,7 @@ sub byCsqClass{
 sub getClinVarSearchArgs{
     return if not $opts{c};
     #use bgzip compressed version of clinvar file from https://github.com/macarthur-lab/clinvar
+    informUser("Checking ClinVar\n");
     my ($bgz, $clinVarCols) = checkClinvarFile($opts{c});
     my $index = "$bgz.tbi";
     my $iterator = Tabix->new(-data =>  $bgz, -index => $index) ;
@@ -604,7 +590,9 @@ sub getClinVarColumns{
     return %columns;
 }
 ###########################################################
-sub getSearchArgs{
+sub getHgmdSearchArgs{
+    return if not $opts{m};
+    informUser("Checking HGMD vcf\n") if $opts{m};
     die "Header not ok for input ($opts{m}) "
       if not VcfReader::checkHeader( vcf => $opts{m} );
     return VcfReader::getSearchArguments($opts{m});
@@ -625,9 +613,7 @@ sub assessAndWriteVariant{
            my %af_info_values = getAfInfoValues(\@split);
            next if ( alleleAboveMaf($al - 1, \%af_info_values) );
         }
-        my @hgmd_matches = searchHgmd($min{$al});
-        my @clinvar_matches = searchClinVar($min{$al});
-        writeToSheet(\@split, $min{$al}, \@hgmd_matches, \@clinvar_matches);
+        writeToSheet(\@split, $min{$al});
     }
 }
 
@@ -671,7 +657,7 @@ sub alleleAboveMaf{
 
 ###########################################################
 sub writeToSheet{
-    my ($l, $var, $matches, $clinvar_matches) = @_;
+    my ($l, $var) = @_;
     #split line, minimized variant hash, HGMD matching lines, ClinVar matching lines
     
     #filter line if allele is too common
@@ -692,43 +678,35 @@ sub writeToSheet{
             }
         }
     }
+    my $var_class; # our designation for this variant
     my @row = (); #values to write out to excel sheet
     my @split_cells = (); #values to write in split cells spanning row
     my @primer_hits = (); #primers that could PCR variant if $opts{primer_file}
-    my %hgmd = ();#keys are HGMD fields, values are array refs of values
     #collect HGMD database annotations if found
-    my @hgmd_fields = 
-    ( qw /
-            hgmd_id
-            disease
-            variant_class
-            gene_symbol
-            hgvs
-        /
-    );
-    if (@$matches){
-        foreach my $h (@$matches){
-            my @match = split("\t", $h);
-            foreach my $f (@hgmd_fields){
-                push @{$hgmd{$f}}, 
-                        VcfReader::getVariantInfoField(\@match, $f);
-            }
-        }
-        foreach my $f (@hgmd_fields){
-            push @row, join(",", @{$hgmd{$f}});
+    if (my @h_matches = getHgmdMatches($var)){
+        push @row, @h_matches;
+        if (grep {$_ eq 'DM'} (split ",", $h_matches[2]) ){
+            $var_class = 'HGMD';
+        }else{
+            $var_class = "HGMD_other";
         }
     }else{
-        foreach my $f (@hgmd_fields){
-            push @row, join("-");
-        }
+        push @row, map {"-"} (1..5); 
     }
-        
+
     #collect ClinVar database annotations if found
-    my ($clnSig, $clnTraits, $cvarPathognic, $cvarConflicted) 
-                         = getClinSig($clinvar_matches, $var);
-    push @row, $clnSig, $clnTraits; 
-    push @row, $cvarConflicted;
-    
+    if (my @c_matches = getClinvarMatches($var)){
+        my $path = shift(@c_matches); 
+        my @p = split(",", $path);
+        if (not $var_class or $var_class ne 'HGMD'){
+            if ( grep {$_ > 0} @p){
+                $var_class = "ClinVarPathogenic";
+            }
+        }
+        push @row, @c_matches;
+    }else{
+        push @row, map {"-"} (1..4); 
+    }
     #deal with VEP annotations
     my @get_vep =  
       qw /
@@ -821,9 +799,9 @@ sub writeToSheet{
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
     my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
-    if (@$matches){
+    if ($var_class and $var_class =~ /HGMD/){
         $s_name = "HGMD";
-    }elsif($cvarPathognic){
+    }elsif ($var_class and $var_class =~ /ClinVar/){
         $s_name = "ClinVarPathogenic";
     }elsif (exists $lofs{$most_damaging_csq}){
         $s_name = "LOF";
@@ -875,7 +853,6 @@ sub writeToSheet{
             $var->{ORIGINAL_ALT},
         ); #we add sample IDS to this string to create UIDs for sample variants
 
-    #TO DO
     #search primers
     if (@primers){
         @primer_hits = searchPrimers($var);
@@ -972,14 +949,7 @@ sub writeToSheet{
                 }
             }
             push @split_cells, \@sample_cells;
-            my $var_class = $s_name; 
-            if ($s_name eq 'HGMD'){
-                if (grep {$_ eq 'DM'} @{$hgmd{variant_class}}){
-                    $var_class = "HGMD_DM";
-                }else{
-                    $var_class = "HGMD_other";
-                }
-            }
+            $var_class ||= $s_name; 
             {
                 no warnings 'uninitialized';
                 push @{$sample_vars{$s}->{$var_class}}, [$allele_cadd, @sample_cells, $var_class, @row, ];
@@ -1014,6 +984,79 @@ sub writeToSheet{
     }
 }
 
+###########################################################
+sub getClinvarMatches{
+    my $var = shift;
+    my %clinvar = ();#keys are HGMD fields, values are array refs of values
+    my @results = ();
+    my @clinvar_fields = 
+    ( qw /
+            pathogenic
+            measureset_id
+            clinical_significance 
+            all_traits 
+            conflicted 
+        /
+    );
+    $search_handles{clinvar_pos}->execute
+    (
+        $var->{CHROM}, 
+        $var->{POS}, 
+        $var->{REF}, 
+        $var->{ALT}, 
+    ) or die "Error searching 'clinvar_pos' table in '$opts{t}': " . 
+      $search_handles{clinvar_pos} -> errstr;
+    
+    while (my @db_row = $search_handles{clinvar_pos}->fetchrow_array()) {
+        for (my $i = 0; $i < @db_row; $i++){
+            push @{$clinvar{$clinvar_fields[$i]}}, $db_row[$i];
+        }
+    }
+    #see if we have an identical variant in HGMD
+    if (%clinvar){
+        foreach my $f (@clinvar_fields){
+            push @results, join(",", @{$clinvar{$f}});
+        }
+    }
+    return @results;
+
+}
+
+###########################################################
+sub getHgmdMatches{
+    my $var = shift;
+    my %hgmd = ();#keys are HGMD fields, values are array refs of values
+    my @results = ();
+    my @hgmd_fields = 
+    ( qw /
+            hgmd_id
+            disease
+            variant_class
+            gene_symbol
+            hgvs
+        /
+    );
+    $search_handles{hgmd_pos}->execute
+    (
+        $var->{CHROM}, 
+        $var->{POS}, 
+        $var->{REF}, 
+        $var->{ALT}, 
+    ) or die "Error searching 'hgmd_pos' table in '$opts{t}': " . 
+      $search_handles{hgmd_pos} -> errstr;
+    while (my @db_row = $search_handles{hgmd_pos}->fetchrow_array()) {
+        for (my $i = 0; $i < @db_row; $i++){
+            push @{$hgmd{$hgmd_fields[$i]}}, $db_row[$i];
+        }
+    }
+    #see if we have an identical variant in HGMD
+    if (%hgmd){
+        foreach my $f (@hgmd_fields){
+            push @results, join(",", @{$hgmd{$f}});
+        }
+    }
+    return @results;
+}
 
 ###########################################################
 sub getEtScore{
@@ -1105,145 +1148,12 @@ sub searchPrimers{
 }
 
 ###########################################################
-#kept for legacy in case need to switch back to ClinVar VCF
-sub getClinVarCodeVcf{
-    my ($clinvars, $var) = @_;
-    #array ref of clinvar VCF lines and a minimized variant hash from input
-    my @annots = ();
-    foreach my $cl (@$clinvars){
-        my @match = split("\t", $cl);
-        my @alts = split(",", VcfReader::getVariantField(\@match, "ALT"));
-        my @clnsigs = split(",", VcfReader::getVariantInfoField(\@match, "CLNSIG"));
-        my @codes = ();
-        if (@alts == @clnsigs){#CLNSIG codes are a bit sketchy, sometimes one per allele sometimes not
-            if (my $i = alleleMatches($var, $cl)){
-                push @codes, split(/\|/, $clnsigs[$i-1]);
-            }
-        }else{
-            foreach my $c (@clnsigs){
-                push @codes, split(/\|/, $c);
-            }
-        }
-        foreach my $code (@codes){
-            push @annots, "$code ($clnsig_codes{$code})";
-        }
-    }
-    return join(", ", @annots); 
-}
-
-###########################################################
-sub getClinSig{
-    my ($clinvars, $var) = @_;
-    #array ref of clinvar lines and a minimized variant hash from input
-    my @clnsig = ();
-    my @trait  = ();
-    my $isPathogenic = 0;
-    my $conflicted   = 0;
-    foreach my $cl (@$clinvars){
-        my @match = split("\t", $cl);
-        push @clnsig, $match[$clinvar_sargs{columns}->{clinical_significance}] ;
-        push @trait, $match[$clinvar_sargs{columns}->{all_traits}] ;
-        $isPathogenic +=  $match[$clinvar_sargs{columns}->{pathogenic}] ;
-        $conflicted   +=  $match[$clinvar_sargs{columns}->{conflicted}] ;
-    }
-    return join(", ", @clnsig), join(", ", @trait), $isPathogenic, $conflicted; 
-}
-    
-###########################################################
-#kept for legacy in case need to switch back to ClinVar VCF
-sub searchClinVarVcf{
-    return if not $opts{c};
-    my $var = shift;#$var is a ref to a single entrey from minimized alleles hash
-    #simplify alleles and check if there's a match in HGMD file
-    my @matches = ();
-    #below is a hack because ClinVar file should be tsv.gz not VCF
-    my @hits = VcfReader::searchByRegion(
-        %clinvar_sargs,
-        chrom => $var->{CHROM},
-        start => $var->{POS},
-        end   => $var->{POS} + length($var->{REF}) - 1,
-    );
-    foreach my $h (@hits){
-        if (alleleMatchesClinVar($var, $h)){
-            push @matches, $h;
-        }
-    }
-    return @matches;
-}
-
-###########################################################
-
-sub searchClinVar{
-    return if not $opts{c};
-    my $var = shift;#$var is a ref to a single entrey from minimized alleles hash
-    #simplify alleles and check if there's a match in HGMD file
-    my @matches = ();
-    #below is a hack because ClinVar file should be tsv.gz not VCF
-    my @hits = VcfReader::searchByRegion(
-        %clinvar_sargs,
-        chrom => $var->{CHROM},
-        start => $var->{POS},
-        end   => $var->{POS} + length($var->{REF}) - 1,
-    );
-    foreach my $h (@hits){
-        if (alleleMatchesClinVar($var, $h)){
-            push @matches, $h;
-        }
-    }
-    return @matches;
-}
-
-###########################################################
-sub searchHgmd{
-    my $var = shift;#$var is a ref to a single entry from minimized alleles hash
-    #simplify alleles and check if there's a match in HGMD file
-    my @matches = ();
-    my @hits = VcfReader::searchByRegion(
-        %search_args,
-        chrom => $var->{CHROM},
-        start => $var->{POS},
-        end   => $var->{POS} + length($var->{REF}) - 1,
-    );
-    foreach my $h (@hits){
-        if (alleleMatches($var, $h)){
-            push @matches, $h;
-        }
-    }
-    return @matches;
-}
-
-
-##########################################################
-sub alleleMatches{
-    my ($var, $line) = @_;
-    #$var is a ref to a single entrey from minimized alleles hash
-    #$line is a VCF entry
-    #returns allele code for matching alt
-    my @split = split ("\t", $line);
-    my $chrom = VcfReader::getVariantField(\@split, 'CHROM');
-    next if $chrom ne $var->{CHROM}; 
-    my %l_min= VcfReader::minimizeAlleles(\@split);
-    foreach my $k (keys %l_min){
-        next if $l_min{$k}->{POS} != $var->{POS};
-        next if $l_min{$k}->{REF} ne $var->{REF};
-        next if $l_min{$k}->{ALT} ne $var->{ALT};
-        return $k;
-    }
-    return 0;
-}
-##########################################################
 sub alleleMatchesClinVar{
-    my ($var, $line) = @_;
+    my ($var, $chrom, $pos, $ref, $alt) = @_;
     #$var is a ref to a single entrey from minimized alleles hash
     #$line is a clinvar entry
     #returns 1 if it matches
-    my @split = split ("\t", $line);
-    my $chrom = $split[$clinvar_sargs{columns}->{chrom}] ;
-    next if $chrom ne $var->{CHROM}; 
-    my $pos = $split[$clinvar_sargs{columns}->{pos}] ;
-    #alleles should already be minimized
-    my $ref = $split[$clinvar_sargs{columns}->{ref}] ;
-    my $alt = $split[$clinvar_sargs{columns}->{alt}] ;
+    return 0 if $chrom ne $var->{CHROM}; 
     return 0 if $pos != $var->{POS};
     return 0 if $ref ne $var->{REF};
     return 0 if $alt ne $var->{ALT};
@@ -1303,9 +1213,10 @@ sub getHeaders{
             variant_class
             HGMD_Symbol
             HGVS
+            ClinVar_ID
             ClinVarSig
-            ClinVarTrait
             ClinVarConflicted
+            ClinVarTrait
             Chrom
             Pos
             Ref
@@ -1528,9 +1439,10 @@ sub getHeaders{
             variant_class
             HGMD_Symbol
             HGVS
+            ClinVar_ID
             ClinVarSig
-            ClinVarTrait
             ClinVarConflicted
+            ClinVarTrait
             Chrom
             Pos
             Ref
@@ -1559,10 +1471,10 @@ sub getHeaders{
         /
     );
 
-    my $md_spl = 7;#colu no. to add primers or validated columns to mostdamaging sheet
-    my $v_spl = 10; #column no. to add uniprot/cdd domain info to variant sheets
+    my $md_spl = 8;#colu no. to add primers or validated columns to mostdamaging sheet
+    my $v_spl = 11; #column no. to add uniprot/cdd domain info to variant sheets
     if (exists $search_handles{et}){
-        splice (@{$h{Variants}}, -7, 0, "EvolutionaryTraceScore"); 
+        splice (@{$h{Variants}}, -8, 0, "EvolutionaryTraceScore"); 
         splice (@{$h{mostdamaging}}, -1, 0,  "EvolutionaryTraceScore");
     }
     if ($opts{primer_file}){
@@ -1939,7 +1851,7 @@ sub checkCollagenDomain{
             next if not $c->{domains};
             my @domains = split ("&", $c->{domains}); #domains variant overlaps
             if (grep { /Pfam_domain:PF01391/i } @domains){
-                if ($opts{v}){
+                if ($opts{verbose}){
                     informUser("Found variant in collagen triple helix\n");
                     informUser("Checking domain sequence using Ensembl REST...\n");
                 }
@@ -1961,7 +1873,7 @@ sub checkCollagenDomain{
                 ); 
                 #find the first repeat of 5 or more Gly-X-Ys 
                 # -- TO DO - more sophisticated HMM perhaps?
-                if ($opts{v}){
+                if ($opts{verbose}){
                     informUser("domain $dom_hash->{id}: $dom_hash->{start}-$dom_hash->{end} - $dom_hash->{seq}\n");
                     informUser("frame: $gxy_frame\n");
                 }
@@ -1973,7 +1885,7 @@ sub checkCollagenDomain{
             next if not $c->{amino_acids};#skip any non-coding variant
             my $seq_hash = getProteinSequence($c->{ensp}); 
             $dom_hash = findGlyXY($seq_hash->{seq}, $c); 
-            if ($dom_hash and $opts{v}){
+            if ($dom_hash and $opts{verbose}){
                 informUser("Found putative Gly-X-Y domain in $c->{symbol} ($c->{ensp}) $dom_hash->{start}-$dom_hash->{end}:\n$dom_hash->{seq}\n");
             }
         }#limitation at the moment - does not allow for deletion spanning more than one GlyXY domains
@@ -2400,17 +2312,9 @@ Output xlsx file. Defaults to input file with .xlsx extension added.
 
 Do not output variants which do not have at least one sample passing the variant criteria.
 
-=item B<-m    --hgmd>
-
-VCF of HGMD variations converted with hgmdMartToVcf.pl.
-
-=item B<-c    --clinvar>
-
-Optional ClinVar VCF to add ClinVar CLINSIG annotations.
-
 =item B<-t    --transcript_database>
 
-Optional sqlite database of transcripts and cross references created with dbCreator.pl 
+sqlite database of transcripts and cross references created with dbCreator.pl 
 
 =item B<-b    --allele_balance>
 
