@@ -240,9 +240,16 @@ sub readTranscriptDatabase{
 
         hgmd_aa =>  $dbh->prepare
         (
-            qq{ select * FROM HGMD_VEP
+            qq{ select hgmd_id, feature, protein_position, amino_acids FROM HGMD_VEP
                 WHERE feature == ? 
                 and protein_position == ? 
+            }
+        ),
+        
+        hgmd_id =>  $dbh->prepare
+        (
+            qq{ select variant_class, disease FROM HGMD
+                WHERE hgmd_id == ? 
             }
         ),
 
@@ -265,6 +272,17 @@ sub readTranscriptDatabase{
                 and protein_position == ? 
             }
         ),
+
+        clinvar_id =>  $dbh->prepare
+        (
+            qq{ select pathogenic, measureset_id, 
+                clinical_significance, conflicted, all_traits 
+                FROM ClinVar
+                WHERE measureset_id == ? 
+            }
+        ),
+
+
     );
 
     if (exists $tables{"\"main\".\"EvolutionaryTrace\""}){
@@ -607,13 +625,13 @@ sub assessAndWriteVariant{
     chomp ($line); 
     my @split = split("\t", $line); 
     #see if variant overlaps any variants in HGMD file
-    my %min= VcfReader::minimizeAlleles(\@split);
+    my %min = VcfReader::minimizeAlleles(\@split);
+    my %af_info_values  = ();
+    if (%af_info_fields){ #check for annotateSnps.pl etc. frequencies
+        %af_info_values = getAfInfoValues(\@split);
+    }
     foreach my $al (sort {$a<=>$b} keys %min){
-        if (%af_info_fields){ #check for annotateSnps.pl etc. frequencies
-           my %af_info_values = getAfInfoValues(\@split);
-           next if ( alleleAboveMaf($al - 1, \%af_info_values) );
-        }
-        writeToSheet(\@split, $min{$al});
+        writeToSheet(\@split, $min{$al}, \%af_info_values);
     }
 }
 
@@ -657,9 +675,11 @@ sub alleleAboveMaf{
 
 ###########################################################
 sub writeToSheet{
-    my ($l, $var) = @_;
-    #split line, minimized variant hash, HGMD matching lines, ClinVar matching lines
-    
+    my ($l, $var, $af_info) = @_;
+    #split line, minimized variant hash, allele frequency INFO hash
+    if (%af_info_fields){ #check for annotateSnps.pl etc. frequencies
+       return if ( alleleAboveMaf($var->{ALT_INDEX} - 1, $af_info) );
+    }
     #filter line if allele is too common
     if ($opts{a}){
         my %allele_counts = VcfReader::countAlleles
@@ -761,6 +781,8 @@ sub writeToSheet{
         }
         push @csq_to_rank , $csq;
     }
+    #get 'most damaging' variant found in transcripts, if same 'damaging' score
+    # for multiple transcripts return the variant in the highest ranked transcript
     my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
     if ($opts{rules}){
         my $o = $csq_to_report->{rule};
@@ -772,6 +794,8 @@ sub writeToSheet{
         $o ||= '';
         push @row, $o;
     }
+
+   
     #add standard VCF fields from this allele only
     foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
         push @row, $var->{$f};
@@ -830,6 +854,152 @@ sub writeToSheet{
     }else{
         $s_name = "Other";
     }
+
+
+##############ACMG SCORING##################
+    my %pathogenic_criteria = 
+    (
+        very_strong => [], 
+        strong      => [], 
+        moderate    => [],
+        supporting  => [],
+    );
+    my %pathogenic_score = 
+    (
+        very_strong => 0, 
+        strong      => 0, 
+        moderate    => 0,
+        supporting  => 0,
+    );
+    if (exists $lofs{$most_damaging_csq}){
+        #check really is LOF
+        if ($csq_to_report->{lof} eq 'HC'){
+            $pathogenic_score{very_strong}++;
+            push @{$pathogenic_criteria{very_strong}}, 
+               "High Confidence LoF"
+            ;
+        }elsif($csq_to_report->{lof} eq 'LC'){
+            my $f = $csq_to_report->{lof_filter} || '';
+            push @{$pathogenic_criteria{very_strong}}, 
+               "Low Confidence LoF: $f"
+            ;
+        }
+    }
+    
+    if ($most_damaging_csq eq 'missense_variant' or 
+        $most_damaging_csq eq 'protein_altering_variant' or 
+        $most_damaging_csq =~  /^inframe_(inser|dele)tion$/ 
+    ){
+        if ($most_damaging_csq eq 'missense_variant'){
+            #in silico predictions add to supporting evidence
+            if ($allele_cadd  >= 10 and 
+                $csq_to_report->{polyphen} =~ /damaging/i and 
+                $csq_to_report->{sift} =~ /deleterious/i
+            ){
+                $pathogenic_score{supporting}++;
+            }
+        }else{
+            if ($allele_cadd >= 10){
+                $pathogenic_score{supporting}++;
+            }
+        } 
+        #check if same amino acid change as previously reported variant
+        my %criteria_matched = ();
+        #keys are either 'moderate' or 'strong' to reflect whether same 
+        # subtitution was observed (strong) or different substitution at
+        # same residue (moderate)
+        $search_handles{hgmd_aa}->execute
+        (
+            $csq_to_report->{feature},
+            $csq_to_report->{protein_position},
+        ) or die "Error searching 'HGMD_VEP' table in '$opts{t}': " . 
+          $search_handles{hgmd_aa} -> errstr;
+        while (my @db_row = $search_handles{hgmd_aa}->fetchrow_array()) {
+            my ($hgmd_id, $feature, $protein_position, $aa) = @db_row; 
+            my $criteria = 'moderate';
+            if ($aa eq $csq_to_report->{amino_acids}){
+                $criteria = 'strong';
+            }
+            $search_handles{hgmd_id}->execute($hgmd_id) 
+              or die "Error searching 'HGMD' table in '$opts{t}': " . 
+              $search_handles{hgmd_id} -> errstr;
+            while (my ($vc, $disease) = $search_handles{hgmd_id}->fetchrow_array()) {
+                push @{$pathogenic_criteria{$criteria}}, 
+                  "$hgmd_id:$vc:$disease";
+                $criteria_matched{$criteria}++ if $vc eq 'DM';
+            }
+        }
+        $search_handles{clinvar_aa}->execute
+        (
+            $csq_to_report->{feature},
+            $csq_to_report->{protein_position},
+        ) or die "Error searching 'ClinVar_VEP' table in '$opts{t}': " . 
+          $search_handles{clinvar_aa} -> errstr;
+        while (my @db_row = $search_handles{clinvar_aa}->fetchrow_array()) {
+            my ($clinvar_id, $feature, $protein_position, $aa) = @db_row; 
+            my $criteria = 'moderate';
+            if ($aa eq $csq_to_report->{amino_acids}){
+                $criteria = 'strong';
+            }
+            $search_handles{clinvar_id}->execute($clinvar_id) 
+              or die "Error searching 'ClinVar' table in '$opts{t}': " . 
+              $search_handles{clinvar_id} -> errstr;
+            while (my ($path, $clinsig, $conflicted, $disease) = 
+                    $search_handles{clinvar_id}->fetchrow_array()
+            ) {
+                push @{$pathogenic_criteria{$criteria}}, 
+                  "$clinvar_id:$clinsig:$disease";
+                $criteria_matched{$criteria}++ if $path and not $conflicted;
+            }
+        }
+        foreach my $c (keys %criteria_matched){
+            $pathogenic_score{$c}++ ;
+        }
+    }
+    
+    if (%af_info_fields){ #moderate support if absent from ExAC and EVS 
+        my $missing_fields = 0;
+        my $present_in_db = 0;
+        foreach my $f 
+        (qw /
+            EVS_EA_AF
+            EVS_AA_AF
+            FVOV_AF_AFR
+            FVOV_AF_AMR
+            FVOV_AF_EAS
+            FVOV_AF_FIN
+            FVOV_AF_NFE
+            FVOV_AF_SAS
+        /){
+            if (not exists $af_info_fields{$f}){
+                $missing_fields++;
+                last;
+            }
+            my @split = split(",", $af_info->{$f}); 
+            if ($split[$var->{ALT_INDEX} -1] ne '.' and 
+                $split[$var->{ALT_INDEX} -1] > 0
+            ){
+                $present_in_db++;
+                last;
+            }
+        }
+        if (not $present_in_db and not $missing_fields){
+            $pathogenic_score{moderate}++;
+            push @{$pathogenic_criteria{moderate}}, "Absent in ExAC and EVS";
+        }
+    }
+
+    #TODO - check Z-score from ExAC if > 2 == supporting    
+ 
+    if (exists $csq_to_report->{rule} ){
+        
+    }
+    if (exists $csq_to_report->{glyxy} ){
+        
+    }
+    #TODO FINISH SCORING and WRITE SCORES/INFO TO SHEET
+##############END OF ACMG SCORING##################
+    
     
     push @row, $csq_to_report->{domains};
     push @row, $csq_to_report->{glyxy_pos};
@@ -1004,7 +1174,7 @@ sub getClinvarMatches{
         $var->{POS}, 
         $var->{REF}, 
         $var->{ALT}, 
-    ) or die "Error searching 'clinvar_pos' table in '$opts{t}': " . 
+    ) or die "Error searching 'ClinVar_VEP' table in '$opts{t}': " . 
       $search_handles{clinvar_pos} -> errstr;
     
     while (my @db_row = $search_handles{clinvar_pos}->fetchrow_array()) {
@@ -1042,7 +1212,7 @@ sub getHgmdMatches{
         $var->{POS}, 
         $var->{REF}, 
         $var->{ALT}, 
-    ) or die "Error searching 'hgmd_pos' table in '$opts{t}': " . 
+    ) or die "Error searching 'HGMD' table in '$opts{t}': " . 
       $search_handles{hgmd_pos} -> errstr;
     while (my @db_row = $search_handles{hgmd_pos}->fetchrow_array()) {
         for (my $i = 0; $i < @db_row; $i++){
@@ -1524,6 +1694,8 @@ sub addSheet{
     return $sheet;
 }
 
+###########################################################
+    
 ###########################################################
 sub rankTranscriptsAndConsequences{
     my $csq_array = shift;#ref to array of VEP consequences 
