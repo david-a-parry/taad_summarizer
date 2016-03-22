@@ -686,7 +686,7 @@ sub writeToSheet{
     if (my @h_matches = getHgmdMatches($var)){
         push @row, @h_matches;
         if (grep {$_ eq 'DM'} (split ",", $h_matches[2]) ){
-            $var_class = 'HGMD';
+            $var_class = 'HGMD_DM';
         }else{
             $var_class = "HGMD_other";
         }
@@ -698,7 +698,7 @@ sub writeToSheet{
     if (my @c_matches = getClinvarMatches($var)){
         my $path = shift(@c_matches); 
         my @p = split(",", $path);
-        if (not $var_class or $var_class ne 'HGMD'){
+        if (not $var_class or $var_class ne 'HGMD_DM'){
             if ( grep {$_ > 0} @p){
                 $var_class = "ClinVarPathogenic";
             }
@@ -1471,8 +1471,16 @@ sub getHeaders{
         /
     );
 
-    my $md_spl = 8;#colu no. to add primers or validated columns to mostdamaging sheet
-    my $v_spl = 11; #column no. to add uniprot/cdd domain info to variant sheets
+    my $md_spl = 0;#colu no. to add primers or validated columns to mostdamaging sheet
+    $md_spl++ until $h{mostdamaging}->[$md_spl] eq 'Category'; 
+        #this means we don't have to hardcode the column no., 
+        # meaning if we edit the header we still insert prior to the Hgmd_ID column
+
+    my $v_spl = 0; #column no. to add uniprot/cdd domain info to variant sheets
+    $v_spl++ until $h{Variants}->[$v_spl] eq 'Chrom'; 
+        #this means we don't have to hardcode the column no., 
+        # meaning if we edit the header we still insert prior to the Chrom column
+
     if (exists $search_handles{et}){
         splice (@{$h{Variants}}, -8, 0, "EvolutionaryTraceScore"); 
         splice (@{$h{mostdamaging}}, -1, 0,  "EvolutionaryTraceScore");
