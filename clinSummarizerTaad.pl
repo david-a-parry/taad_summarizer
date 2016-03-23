@@ -240,7 +240,8 @@ sub readTranscriptDatabase{
 
         hgmd_aa =>  $dbh->prepare
         (
-            qq{ select hgmd_id, feature, protein_position, amino_acids FROM HGMD_VEP
+            qq{ select hgmd_id, feature, protein_position, amino_acids, hgvsc, hgvsp
+                 FROM HGMD_VEP
                 WHERE feature == ? 
                 and protein_position == ? 
             }
@@ -253,10 +254,18 @@ sub readTranscriptDatabase{
             }
         ),
 
+        hgmd_hgvs =>  $dbh->prepare
+        (
+            qq{ select hgvsc, hgvsp
+                 FROM HGMD_VEP
+                WHERE hgmd_id == ? 
+            }
+        ),
+
         clinvar_pos =>  $dbh->prepare
         (
-            qq{ select pathogenic, measureset_id, 
-                clinical_significance, conflicted, all_traits 
+            qq{ select measureset_id, pathogenic, 
+                clinical_significance, all_traits, conflicted 
                 FROM ClinVar
                 WHERE chrom == ? 
                 and pos == ? 
@@ -267,16 +276,25 @@ sub readTranscriptDatabase{
 
         clinvar_aa =>  $dbh->prepare
         (
-            qq{ select * FROM ClinVar_VEP
+            qq{ select measureset_id, feature, protein_position, amino_acids, hgvsc, hgvsp
+                FROM ClinVar_VEP
                 WHERE feature == ? 
                 and protein_position == ? 
             }
         ),
 
+
+        clinvar_hgvs =>  $dbh->prepare
+        (
+            qq{ select hgvsc, hgvsp
+                FROM ClinVar_VEP
+                WHERE measureset_id == ? 
+            }
+        ),
+
         clinvar_id =>  $dbh->prepare
         (
-            qq{ select pathogenic, measureset_id, 
-                clinical_significance, conflicted, all_traits 
+            qq{ select pathogenic, clinical_significance, conflicted, all_traits 
                 FROM ClinVar
                 WHERE measureset_id == ? 
             }
@@ -404,18 +422,7 @@ sub byCsqClass{
     if ($a eq $b){
         return 0;
     }
-    foreach my $class (qw / 
-            HGMD_DM 
-            ClinVarPathogenic 
-            LOF 
-            Rules
-            CollagenGlyXY 
-            HGMD_other 
-            DamagingMissense 
-            BenignMissense
-            Other
-            /){
-
+    foreach my $class ("Pathogenic", "Likely Pathogenic", "Uncertain Significance"){
         if ($a eq "$class"){
             return -1;
         }elsif ($b eq "$class"){
@@ -702,31 +709,7 @@ sub writeToSheet{
     my @row = (); #values to write out to excel sheet
     my @split_cells = (); #values to write in split cells spanning row
     my @primer_hits = (); #primers that could PCR variant if $opts{primer_file}
-    #collect HGMD database annotations if found
-    if (my @h_matches = getHgmdMatches($var)){
-        push @row, @h_matches;
-        if (grep {$_ eq 'DM'} (split ",", $h_matches[2]) ){
-            $var_class = 'HGMD_DM';
-        }else{
-            $var_class = "HGMD_other";
-        }
-    }else{
-        push @row, map {"-"} (1..5); 
-    }
 
-    #collect ClinVar database annotations if found
-    if (my @c_matches = getClinvarMatches($var)){
-        my $path = shift(@c_matches); 
-        my @p = split(",", $path);
-        if (not $var_class or $var_class ne 'HGMD_DM'){
-            if ( grep {$_ > 0} @p){
-                $var_class = "ClinVarPathogenic";
-            }
-        }
-        push @row, @c_matches;
-    }else{
-        push @row, map {"-"} (1..4); 
-    }
     #deal with VEP annotations
     my @get_vep =  
       qw /
@@ -781,6 +764,56 @@ sub writeToSheet{
         }
         push @csq_to_rank , $csq;
     }
+
+    #collect HGMD database annotations if found
+    my @h_matches = ();#hashes of hgmd matching variants
+    #keys are: hgmd_id, disease, variant_class, gene_symbol, hgvs
+    my @c_matches = ();#hases of clinvar matching variants
+    #keys are: measureset_id, pathogenic, clinical_significance, all_traits, conflicted 
+    if (@h_matches = getHgmdMatches($var)){
+        foreach my $f 
+        ( qw /
+                hgmd_id
+                disease
+                variant_class
+                gene_symbol
+                hgvs
+            /
+        ){#add HGMD results to row, multiple values per field separated by commas
+            my $s = join(",", map { $_->{$f} } @h_matches );
+            push @row, $s;
+        }
+        if (grep {$_->{variant_class} eq 'DM'} @h_matches ){
+            $var_class = 'HGMD_DM';
+        }else{
+            $var_class = "HGMD_other";
+        }
+    }else{
+        push @row, map {"-"} (1..5); 
+    }
+
+    #collect ClinVar database annotations if found
+    if (@c_matches = getClinvarMatches($var)){
+        foreach my $f 
+        ( qw /
+                measureset_id
+                clinical_significance 
+                all_traits 
+                conflicted 
+            /
+        ){#add ClinVar results to row, multiple values per field separated by commas
+            my $s = join(",", map { $_->{$f} } @c_matches );
+            push @row, $s;
+        }
+        if (not $var_class or $var_class ne 'HGMD_DM'){
+            if (grep {$_->{pathogenic} == 1 and $_->{conflicted} == 0 } @c_matches ){
+                $var_class = "ClinVarPathogenic";
+            }
+        }
+    }else{
+        push @row, map {"-"} (1..4); 
+    }
+
     #get 'most damaging' variant found in transcripts, if same 'damaging' score
     # for multiple transcripts return the variant in the highest ranked transcript
     my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
@@ -808,61 +841,36 @@ sub writeToSheet{
     foreach my $f (@vep_fields){
         push @row, $csq_to_report->{$f};
     }
-    #choose sheet to write to
-    my $s_name;
     my %lofs = map {$_ => undef} qw /
         transcript_ablation  
         splice_acceptor_variant
         splice_donor_variant
         stop_gained
         frameshift_variant
-        stop_lost
         start_lost
-        transcript_amplification
     /;
     my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
     my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
     my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
-    if ($var_class and $var_class =~ /HGMD/){
-        $s_name = "HGMD";
-    }elsif ($var_class and $var_class =~ /ClinVar/){
-        $s_name = "ClinVarPathogenic";
-    }elsif (exists $lofs{$most_damaging_csq}){
-        $s_name = "LOF";
-    }elsif (exists $csq_to_report->{rule} ){
-        $s_name = "Rules";
-    #check if in collagen domain
-    }elsif (exists $csq_to_report->{glyxy} ){
-        $s_name = "CollagenGlyXY";
-    }elsif ($most_damaging_csq eq 'missense_variant'){
-        #check if damaging or benign...
-        if ($allele_cadd  >= 10 and 
-            $csq_to_report->{polyphen} =~ /damaging/i and 
-            $csq_to_report->{sift} =~ /deleterious/i
-        ){
-            $s_name = "DamagingMissense";
-        }else{
-            $s_name = "BenignMissense";
-        }
-    }elsif( $most_damaging_csq =~  /^inframe_(inser|dele)tion$/ or
-            $most_damaging_csq eq 'protein_altering_variant'){
-        if ($allele_cadd >= 10){
-            $s_name = "DamagingMissense";
-        }else{
-            $s_name = "BenignMissense";
-        }
-    }else{
-        $s_name = "Other";
-    }
-
 
 ##############ACMG SCORING##################
+#1.  if HC LoF = very_strong evidence - TODO - check pLI? check splice consequence?
+#2a. if polyphen, SIFT and CADD predict damaging missense = supporting evidence
+#2b. if in-frame indel if CADD predicts damaging = supporting evidence
+#3a. if missense or inframe indel and same amino acid substitution as previously observed = strong evidence
+#3b. if missense or inframe indel and different substituion of same residue = moderate evidence
+#3c. if other type of variant but same variant has been previously reported = strong evidence
+#5.  if absent from ExAC and EVS = moderate evidence 
+#6.  if matches one of our 'rules' = strong evidence
+#7.  TODO - if missense in a gene with a Z-score > 2 = supporting evidence
+#8.  TODO - if Stop loss or run on frameshift = moderate
     my %pathogenic_criteria = 
     (
         very_strong => [], 
         strong      => [], 
         moderate    => [],
         supporting  => [],
+        other       => [],
     );
     my %pathogenic_score = 
     (
@@ -870,6 +878,7 @@ sub writeToSheet{
         strong      => 0, 
         moderate    => 0,
         supporting  => 0,
+        other       => 0,
     );
     if (exists $lofs{$most_damaging_csq}){
         #check really is LOF
@@ -885,6 +894,7 @@ sub writeToSheet{
             ;
         }
     }
+    #TODO check stop losses or run ons
     
     if ($most_damaging_csq eq 'missense_variant' or 
         $most_damaging_csq eq 'protein_altering_variant' or 
@@ -915,18 +925,23 @@ sub writeToSheet{
         ) or die "Error searching 'HGMD_VEP' table in '$opts{t}': " . 
           $search_handles{hgmd_aa} -> errstr;
         while (my @db_row = $search_handles{hgmd_aa}->fetchrow_array()) {
-            my ($hgmd_id, $feature, $protein_position, $aa) = @db_row; 
+            my ($hgmd_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
             my $criteria = 'moderate';
+            my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
                 $criteria = 'strong';
+                $desc = "same AA change";
             }
             $search_handles{hgmd_id}->execute($hgmd_id) 
               or die "Error searching 'HGMD' table in '$opts{t}': " . 
               $search_handles{hgmd_id} -> errstr;
             while (my ($vc, $disease) = $search_handles{hgmd_id}->fetchrow_array()) {
+                if ($vc ne 'DM'){
+                    $criteria = 'other';
+                }
                 push @{$pathogenic_criteria{$criteria}}, 
-                  "$hgmd_id:$vc:$disease";
-                $criteria_matched{$criteria}++ if $vc eq 'DM';
+                  "$desc:HGMD_$hgmd_id:$vc:$disease:$hgvsc:$hgvsp";
+                $criteria_matched{$criteria}++;
             }
         }
         $search_handles{clinvar_aa}->execute
@@ -936,10 +951,12 @@ sub writeToSheet{
         ) or die "Error searching 'ClinVar_VEP' table in '$opts{t}': " . 
           $search_handles{clinvar_aa} -> errstr;
         while (my @db_row = $search_handles{clinvar_aa}->fetchrow_array()) {
-            my ($clinvar_id, $feature, $protein_position, $aa) = @db_row; 
+            my ($clinvar_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
             my $criteria = 'moderate';
+            my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
                 $criteria = 'strong';
+                $desc = "same AA change";
             }
             $search_handles{clinvar_id}->execute($clinvar_id) 
               or die "Error searching 'ClinVar' table in '$opts{t}': " . 
@@ -947,16 +964,52 @@ sub writeToSheet{
             while (my ($path, $clinsig, $conflicted, $disease) = 
                     $search_handles{clinvar_id}->fetchrow_array()
             ) {
+                if ($conflicted or not $path){
+                    $criteria = 'other';
+                }
                 push @{$pathogenic_criteria{$criteria}}, 
-                  "$clinvar_id:$clinsig:$disease";
-                $criteria_matched{$criteria}++ if $path and not $conflicted;
+                  "$desc:ClinVar_$clinvar_id:$clinsig:$disease:$hgvsc:$hgvsp";
+                $criteria_matched{$criteria}++;
             }
         }
         foreach my $c (keys %criteria_matched){
             $pathogenic_score{$c}++ ;
         }
+    }else{
+    #if not a missense/inframe indel but same as previously reported DM = strong evidence
+        if ($var_class and ($var_class eq 'HGMD_DM' or $var_class eq "ClinVarPathogenic")){
+            $pathogenic_score{strong}++ ;
+            if (@h_matches){
+                foreach my $m (@h_matches){
+                    push @{$pathogenic_criteria{strong}}, 
+                      join(":", "HGMD variant", 
+                                map { $m->{$_} } 
+                                qw /
+                                    hgmd_id
+                                    variant_class
+                                    disease
+                                    hgvsc
+                                    hgvsp
+                                /
+                      );
+                }
+            }
+            foreach my $m (@c_matches){
+                push @{$pathogenic_criteria{strong}}, 
+                  join(":", "ClinVar variant", 
+                            map { $m->{$_} } 
+                            qw /
+                                measureset_id
+                                clinical_significance
+                                all_traits
+                                hgvsc
+                                hgvsp
+                            /
+                  );
+            }
+        }
     }
-    
+                
     if (%af_info_fields){ #moderate support if absent from ExAC and EVS 
         my $missing_fields = 0;
         my $present_in_db = 0;
@@ -992,14 +1045,16 @@ sub writeToSheet{
     #TODO - check Z-score from ExAC if > 2 == supporting    
  
     if (exists $csq_to_report->{rule} ){
-        
+        $pathogenic_score{strong}++;
+        push @{$pathogenic_criteria{strong}}, "Rules: $csq_to_report->{rule}";
+    }elsif (exists $csq_to_report->{glyxy} ){
+        $pathogenic_score{strong}++;
+        push @{$pathogenic_criteria{strong}}, "GlyXY: $csq_to_report->{glyxy}";
     }
-    if (exists $csq_to_report->{glyxy} ){
-        
-    }
-    #TODO FINISH SCORING and WRITE SCORES/INFO TO SHEET
+    #WRITE SCORES/INFO TO SHEET
+    #choose sheet to write to
+    my $s_name = classifyPathogenicity(\%pathogenic_score);
 ##############END OF ACMG SCORING##################
-    
     
     push @row, $csq_to_report->{domains};
     push @row, $csq_to_report->{glyxy_pos};
@@ -1127,13 +1182,34 @@ sub writeToSheet{
         }
     }
     if (not $opts{n} or $variant_has_valid_sample){
+        my $path_score = 0;
+        my @score_string = ();
+        my @criteria_string = ();
+        my @cats = (
+            qw /
+                other
+                supporting 
+                moderate   
+                strong      
+                very_strong 
+            /
+        );
+        for (my $i = $#cats; $i >= 0; $i--){
+            push @score_string, "$cats[$i]: $pathogenic_score{$cats[$i]}";
+            $path_score += $i * $pathogenic_score{$cats[$i]};
+            if (@{$pathogenic_criteria{$cats[$i]}}){
+                push @criteria_string, "$cats[$i]: " . join("|", @{$pathogenic_criteria{$cats[$i]}});
+            }
+        }
+        unshift @row, join("\n", @criteria_string);
+        unshift @row, join("\n", @score_string);
+        unshift @row, $path_score;
         my $category = $s_name;
         $variant_counts{$category}++;
         if ($opts{1}){
             $s_name = 'Variants';
         }
         unshift @row, $category;
-        unshift @row, "$category.$variant_counts{$category}";
         if ($opts{x}){ #do not merge
             foreach my $s (@split_cells){
                 my @full_line = (@row, @$s); 
@@ -1153,6 +1229,95 @@ sub writeToSheet{
         }
     }
 }
+###########################################################
+sub classifyPathogenicity{
+    my $p_hash = shift;
+    #Pathogenic criteria
+    if ($p_hash->{very_strong} >= 1){
+        return 'Pathogenic';
+    }
+    if ($p_hash->{strong} >= 2){
+        return 'Pathogenic';
+    }
+    if ($p_hash->{strong} >= 1){
+        if ($p_hash->{moderate} >= 3 or 
+            ($p_hash->{moderate} >= 2 and $p_hash->{supporting} >= 2) or 
+            ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 4) 
+        ){
+            return 'Pathogenic';
+        }
+    }
+
+    #Likely pathogenic criteria
+    if ($p_hash->{strong} >= 1){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 3){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 2 and $p_hash->{supporting} >= 2){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 4){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 1){
+        return 'Uncertain Significance';
+    }
+    
+    #at the moment we do not attempt to assign 'benign' status
+    return 'Not Classified';
+}
+
+
+###########################################################
+sub classifyPathogenicityAcmg{
+    my $p_hash = shift;
+    #Pathogenic criteria
+    if ($p_hash->{very_strong} >= 1){
+        if ($p_hash->{strong} >= 1 or 
+            $p_hash->{moderate} >= 2 or 
+            ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 1) or 
+            $p_hash->{supporting} >= 2 
+        ){
+            return 'Pathogenic';
+        }
+    }
+    if ($p_hash->{strong} >= 2){
+        return 'Pathogenic';
+    }
+    if ($p_hash->{strong} >= 1){
+        if ($p_hash->{moderate} >= 3 or 
+            ($p_hash->{moderate} >= 2 and $p_hash->{supporting} >= 2) or 
+            ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 4) 
+        ){
+            return 'Pathogenic';
+        }
+    }
+
+    #Likely pathogenic criteria
+    if ($p_hash->{very_strong} >= 1 and $p_hash->{moderate} >= 1){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{strong} >= 1){
+        if ($p_hash->{moderate} >= 1 or $p_hash->{supporting} >= 2){
+            return 'Likely Pathogenic';
+        }
+    }
+    if ($p_hash->{moderate} >= 3){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 2 and $p_hash->{supporting} >= 2){
+        return 'Likely Pathogenic';
+    }
+    if ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 4){
+        return 'Likely Pathogenic';
+    }
+    
+    #at the moment we do not attempt to assign 'benign' status
+    #instead we classify as VUS       
+    return 'Uncertain Significance';
+}
 
 ###########################################################
 sub getClinvarMatches{
@@ -1161,8 +1326,8 @@ sub getClinvarMatches{
     my @results = ();
     my @clinvar_fields = 
     ( qw /
-            pathogenic
             measureset_id
+            pathogenic
             clinical_significance 
             all_traits 
             conflicted 
@@ -1178,24 +1343,22 @@ sub getClinvarMatches{
       $search_handles{clinvar_pos} -> errstr;
     
     while (my @db_row = $search_handles{clinvar_pos}->fetchrow_array()) {
+        my %clinvar = ();
         for (my $i = 0; $i < @db_row; $i++){
-            push @{$clinvar{$clinvar_fields[$i]}}, $db_row[$i];
+            $clinvar{$clinvar_fields[$i]} = $db_row[$i];
         }
-    }
-    #see if we have an identical variant in HGMD
-    if (%clinvar){
-        foreach my $f (@clinvar_fields){
-            push @results, join(",", @{$clinvar{$f}});
-        }
+        $search_handles{clinvar_hgvs}->execute($db_row[0]) 
+          or die "Error searching 'ClinVar' table in '$opts{t}': " . 
+          $search_handles{clinvar_hgvs} -> errstr;
+        ($clinvar{hgvsc}, $clinvar{hgvsp}) = $search_handles{clinvar_hgvs}->fetchrow_array();
+        push @results, \%clinvar;
     }
     return @results;
-
 }
 
 ###########################################################
 sub getHgmdMatches{
     my $var = shift;
-    my %hgmd = ();#keys are HGMD fields, values are array refs of values
     my @results = ();
     my @hgmd_fields = 
     ( qw /
@@ -1215,15 +1378,15 @@ sub getHgmdMatches{
     ) or die "Error searching 'HGMD' table in '$opts{t}': " . 
       $search_handles{hgmd_pos} -> errstr;
     while (my @db_row = $search_handles{hgmd_pos}->fetchrow_array()) {
+        my %hgmd = ();
         for (my $i = 0; $i < @db_row; $i++){
-            push @{$hgmd{$hgmd_fields[$i]}}, $db_row[$i];
+            $hgmd{$hgmd_fields[$i]} = $db_row[$i];
         }
-    }
-    #see if we have an identical variant in HGMD
-    if (%hgmd){
-        foreach my $f (@hgmd_fields){
-            push @results, join(",", @{$hgmd{$f}});
-        }
+        $search_handles{hgmd_hgvs}->execute($db_row[0]) 
+          or die "Error searching 'HGMD' table in '$opts{t}': " . 
+          $search_handles{hgmd_hgvs} -> errstr;
+        ($hgmd{hgvsc}, $hgmd{hgvsp}) = $search_handles{hgmd_hgvs}->fetchrow_array();
+        push @results, \%hgmd;
     }
     return @results;
 }
@@ -1348,17 +1511,13 @@ sub setupOutput{
         $header_formatting = $xl_obj->createFormat(bold => 1);
         writeHeader($sheets{Variants}, $headers{Variants});
     }else{
-        $xl_obj = TextToExcel->new( file=> $opts{o}, name => "HGMD");
+        $xl_obj = TextToExcel->new( file=> $opts{o}, name => "Pathogenic");
         $header_formatting = $xl_obj->createFormat(bold => 1);
-        writeHeader($sheets{HGMD}, $headers{Variants});
-        $sheets{HGMD} = 0;
-        $sheets{ClinVarPathogenic} = addSheet("ClinVarPathogenic", $headers{Variants});
-        $sheets{LOF} = addSheet("LOF", $headers{Variants});
-        $sheets{Rules} = addSheet("Rules", $headers{Variants}) if $opts{rules};
-        $sheets{CollagenGlyXY} = addSheet("CollagenGlyXY", $headers{Variants});
-        $sheets{DamagingMissense} = addSheet("DamagingMissense", $headers{Variants});
-        $sheets{BenignMissense} = addSheet("BenignMissense", $headers{Variants});
-        $sheets{Other} = addSheet("Other", $headers{Variants});
+        writeHeader($sheets{Pathogenic}, $headers{Variants});
+        $sheets{Pathogenic} = 0;
+        $sheets{"Likely Pathogenic"} = addSheet("Likely Pathogenic", $headers{Variants});
+        $sheets{"Uncertain Significance"} = addSheet("Uncertain Significance", $headers{Variants});
+        $sheets{"Not Classified"} = addSheet("Not Classified", $headers{Variants});
     }
 
     $sheets{SampleSummary} = addSheet("Sample Summary", $headers{sample});
@@ -1376,8 +1535,10 @@ sub getHeaders{
 
     @{$h{Variants}} =  ( #header for all variant sheets
         qw/
-            index
             Category
+            Score
+            ScoreBreakdown
+            Criteria
             Hgmd_ID
             Disease
             variant_class
@@ -1581,18 +1742,11 @@ sub getHeaders{
 =cut
 
     @{$h{sample}} =  (  
-        qw / 
-            Sample
-            HGMD_DM
-            ClinVarPathogenic
-            CollagenGlyXY
-            Rules
-            LOF
-            HGMD_other
-            DamagingMissense
-            BenignMissense
-            Other
-            /
+            "Sample",
+            "Pathogenic",
+            "Likely Pathogenic",
+            "Uncertain Significance",
+            "Not Classified",
     );
     @{$h{mostdamaging}} =  ( #header for all variant sheets
         qw/
@@ -1604,6 +1758,9 @@ sub getHeaders{
             PL
             UID
             Category
+            Score
+            ScoreBreakdown
+            Criteria
             Hgmd_ID
             Disease
             variant_class
@@ -1744,7 +1901,6 @@ sub getCddAndUniprotOverlappingFeatures{
       or die "Error searching 'uniprot' table in '$opts{t}': " . 
       $search_handles{uniprot} -> errstr;
     while (my @row = $search_handles{uniprot}->fetchrow_array()) {
-       #CREATE TABLE uniprot (GeneName TEXT, UniprotId TEXT, Start INT not null, End INT not null, Feature TEXT not null, Note TEXT);
         my $hash = 
         { 
             type    => "uniprot", 
@@ -1752,6 +1908,8 @@ sub getCddAndUniprotOverlappingFeatures{
             end     => $row[3],
             feature => $row[4],
             note    => $row[5],
+            grch37pos => $row[6],
+            grch38pos => $row[7],
         }; 
         push @hits, $hash;
     }
@@ -1760,7 +1918,6 @@ sub getCddAndUniprotOverlappingFeatures{
       or die "Error searching 'cdd' table in '$opts{t}': " . 
       $search_handles{cdd} -> errstr;
     while (my @row = $search_handles{cdd}->fetchrow_array()) {
-        #CREATE TABLE cdd (UniprotId TEXT not null, symbol TEXT, ResultType TEXT, Feature TEXT, Residues TEXT, Start INT not null, End INT not null);
         my $type = '';
         if ($row[2] eq 'Feature'){
             $type = 'cdd_feature';
@@ -1772,11 +1929,13 @@ sub getCddAndUniprotOverlappingFeatures{
         }
         my $hash = 
         { 
-            type     => $type, 
-            feature  => $row[3],
-            residues => $row[4],#residues are only present in 'Feature' types, not 'Hit'
-            start    => $row[5],
-            end      => $row[6],
+            type      => $type, 
+            feature   => $row[3],
+            residues  => $row[4],#residues are only present in 'Feature' types, not 'Hit'
+            start     => $row[5],
+            end       => $row[6],
+            grch37pos => $row[7],
+            grch38pos => $row[8],
         }; 
         push @hits, $hash;
     }
