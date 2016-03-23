@@ -1068,7 +1068,29 @@ sub writeToSheet{
     }
 
     push @row, $allele_cadd;
-
+    #add variant score/classifcaiton/info to beginning of row
+        my $path_score = 0;
+        my @score_string = ();
+        my @criteria_string = ();
+        my @cats = (
+            qw /
+                other
+                supporting 
+                moderate   
+                strong      
+                very_strong 
+            /
+        );
+        for (my $i = $#cats; $i >= 0; $i--){
+            push @score_string, "$cats[$i]: $pathogenic_score{$cats[$i]}";
+            $path_score += $i * $pathogenic_score{$cats[$i]};
+            if (@{$pathogenic_criteria{$cats[$i]}}){
+                push @criteria_string, "$cats[$i]: " . join("|", @{$pathogenic_criteria{$cats[$i]}});
+            }
+        }
+    unshift @row, join("\n", @criteria_string);
+    unshift @row, join("\n", @score_string);
+    unshift @row, $path_score;
     my $uid_base = sprintf
         (
             "%s:%s-%s/%s-", 
@@ -1182,28 +1204,7 @@ sub writeToSheet{
         }
     }
     if (not $opts{n} or $variant_has_valid_sample){
-        my $path_score = 0;
-        my @score_string = ();
-        my @criteria_string = ();
-        my @cats = (
-            qw /
-                other
-                supporting 
-                moderate   
-                strong      
-                very_strong 
-            /
-        );
-        for (my $i = $#cats; $i >= 0; $i--){
-            push @score_string, "$cats[$i]: $pathogenic_score{$cats[$i]}";
-            $path_score += $i * $pathogenic_score{$cats[$i]};
-            if (@{$pathogenic_criteria{$cats[$i]}}){
-                push @criteria_string, "$cats[$i]: " . join("|", @{$pathogenic_criteria{$cats[$i]}});
-            }
-        }
-        unshift @row, join("\n", @criteria_string);
-        unshift @row, join("\n", @score_string);
-        unshift @row, $path_score;
+        
         my $category = $s_name;
         $variant_counts{$category}++;
         if ($opts{1}){
