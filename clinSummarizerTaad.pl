@@ -839,10 +839,14 @@ sub writeToSheet{
             $is_lof = "HC_LoF";
         }elsif($csq_to_report->{lof} and $csq_to_report->{lof} eq 'LC'){
             my $f = $csq_to_report->{lof_filter} || '';
-            push @{$pathogenic_criteria{very_strong}}, 
+            push @{$pathogenic_criteria{strong}}, 
                "Low Confidence LoF: $f";
+            $pathogenic_score{strong}++;
             $is_lof = "LC_LoF";
         }else{
+            push @{$pathogenic_criteria{strong}}, 
+               "Potential LoF ($most_damaging_csq)";
+            $pathogenic_score{strong}++;
             $is_lof = "Potential_LoF";
         }
     }
@@ -1025,11 +1029,8 @@ sub writeToSheet{
         $pathogenic_score{strong}++;
         push @{$pathogenic_criteria{strong}}, "GlyXY: $csq_to_report->{glyxy}";
     }
-    #WRITE SCORES/INFO TO SHEET
-    #choose sheet to write to
-    my $s_name = classifyPathogenicity(\%pathogenic_score);
 ##############END OF ACMG SCORING##################
-###ASSIGN $var_class
+    ###ASSIGN $var_class
     if ($is_dm){
         $var_class = $is_dm;
     }elsif($is_lof){
@@ -1047,6 +1048,8 @@ sub writeToSheet{
     }
     
 ##############ADD VALUES TO ROW FROM SPREADSHEET##
+    #choose sheet to write to
+    my $s_name = classifyPathogenicity(\%pathogenic_score);
     if (@h_matches){
         foreach my $f 
         ( qw /
