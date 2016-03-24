@@ -390,23 +390,32 @@ sub writeSampleSummary{
         # likely pathogenic 
         my @csq = sort byCsqClass keys %{$sample_vars{$s}}; 
         if (not @csq){ #no variants for this sample
-            push @{ $most_damaging{NONE} }, [0, $s]; 
+            push @{ $most_damaging{NONE} }, [0, 0, $s]; 
         }else{
             if (@{$sample_vars{$s}->{$csq[0]}} > 1){ 
-            #if multiple variants with most damaging category chose the highest CADD score
-            #CADD score will be first entry in array ref
-            
-                @{$sample_vars{$s}->{$csq[0]}} = sort {$b->[0] <=> $a->[0]} @{$sample_vars{$s}->{$csq[0]}};
+            #if multiple variants with most damaging category choose 
+            #the highest path score followed by highest CADD score
+            #path score and CADD score will be first and second entry in array ref
+                @{$sample_vars{$s}->{$csq[0]}} = 
+                    sort {
+                        $b->[0] <=> $a->[0] ||
+                        $b->[1] <=> $a->[1]
+                    } @{$sample_vars{$s}->{$csq[0]}};
             }
             push @{ $most_damaging{$csq[0]} }, $sample_vars{$s}->{$csq[0]}->[0]; 
 
         }
     }
     foreach my $k (sort byCsqClass keys %most_damaging){
-        #order each category by CADD score
-        #CADD score will be first entry in array ref
-        foreach my $var ( sort {$b->[0] <=> $a->[0]} @{ $most_damaging{$k} } ){
-            #remove cadd score from beginning of line
+        #order each category by path score, then by CADD score
+        #path score and CADD score will be first and second entry in array ref
+        foreach my $var ( 
+            sort { $b->[0] <=> $a->[0] || 
+                   $b->[1] <=> $a->[1] 
+            } @{ $most_damaging{$k} } 
+        ){
+            #remove path score and cadd score from beginning of line
+            shift @$var; 
             shift @$var; 
             $xl_obj->writeLine
             (
@@ -765,93 +774,23 @@ sub writeToSheet{
         push @csq_to_rank , $csq;
     }
 
-    #collect HGMD database annotations if found
+    my $is_dm = '';#flag for matching pathogenic HGMD or ClinVar (counts only once)
+    my $is_other = '';#flag for other matching HGMD or ClinVar
+    my $is_lof = '';
+    my $is_damaging = '';
+
+    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
+    my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
+    my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
+    my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
+
+    #collect HGMD and ClinVar database annotations if found
     my @h_matches = ();#hashes of hgmd matching variants
     #keys are: hgmd_id, disease, variant_class, gene_symbol, hgvs
     my @c_matches = ();#hases of clinvar matching variants
     #keys are: measureset_id, pathogenic, clinical_significance, all_traits, conflicted 
-    if (@h_matches = getHgmdMatches($var)){
-        foreach my $f 
-        ( qw /
-                hgmd_id
-                disease
-                variant_class
-                gene_symbol
-                hgvs
-            /
-        ){#add HGMD results to row, multiple values per field separated by commas
-            my $s = join(",", map { $_->{$f} } @h_matches );
-            push @row, $s;
-        }
-        if (grep {$_->{variant_class} eq 'DM'} @h_matches ){
-            $var_class = 'HGMD_DM';
-        }else{
-            $var_class = "HGMD_other";
-        }
-    }else{
-        push @row, map {"-"} (1..5); 
-    }
-
-    #collect ClinVar database annotations if found
-    if (@c_matches = getClinvarMatches($var)){
-        foreach my $f 
-        ( qw /
-                measureset_id
-                clinical_significance 
-                all_traits 
-                conflicted 
-            /
-        ){#add ClinVar results to row, multiple values per field separated by commas
-            my $s = join(",", map { $_->{$f} } @c_matches );
-            push @row, $s;
-        }
-        if (not $var_class or $var_class ne 'HGMD_DM'){
-            if (grep {$_->{pathogenic} == 1 and $_->{conflicted} == 0 } @c_matches ){
-                $var_class = "ClinVarPathogenic";
-            }
-        }
-    }else{
-        push @row, map {"-"} (1..4); 
-    }
-
-    #get 'most damaging' variant found in transcripts, if same 'damaging' score
-    # for multiple transcripts return the variant in the highest ranked transcript
-    my $csq_to_report = rankTranscriptsAndConsequences(\@csq_to_rank); 
-    if ($opts{rules}){
-        my $o = $csq_to_report->{rule};
-        $o ||= '';
-        push @row, $o;
-    }
-    if ($opts{t}){
-        my $o = $csq_to_report->{overlap_features};
-        $o ||= '';
-        push @row, $o;
-    }
-
-   
-    #add standard VCF fields from this allele only
-    foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
-        push @row, $var->{$f};
-    }
-    push @row, VcfReader::getVariantField($l, 'ID');
-    push @row, VcfReader::getVariantField($l, 'QUAL');
-    push @row, VcfReader::getVariantField($l, 'FILTER');
-
-    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp exon intron / );
-    foreach my $f (@vep_fields){
-        push @row, $csq_to_report->{$f};
-    }
-    my %lofs = map {$_ => undef} qw /
-        transcript_ablation  
-        splice_acceptor_variant
-        splice_donor_variant
-        stop_gained
-        frameshift_variant
-        start_lost
-    /;
-    my $most_damaging_csq = getMostDamagingConsequence($csq_to_report);
-    my @cadd = split(",", VcfReader::getVariantInfoField($l, "CaddPhredScore"));
-    my $allele_cadd = $cadd[ ($var->{ALT_INDEX} -1) ];
+    @h_matches = getHgmdMatches($var);
+    @c_matches = getClinvarMatches($var);
 
 ##############ACMG SCORING##################
 #1.  if HC LoF = very_strong evidence - TODO - check pLI? check splice consequence?
@@ -880,22 +819,82 @@ sub writeToSheet{
         supporting  => 0,
         other       => 0,
     );
+    
+    my %lofs = map {$_ => undef} qw /
+        transcript_ablation  
+        splice_acceptor_variant
+        splice_donor_variant
+        stop_gained
+        frameshift_variant
+        start_lost
+    /;
+
+
     if (exists $lofs{$most_damaging_csq}){
         #check really is LOF
-        if ($csq_to_report->{lof} eq 'HC'){
+        if ($csq_to_report->{lof} and $csq_to_report->{lof} eq 'HC'){
             $pathogenic_score{very_strong}++;
             push @{$pathogenic_criteria{very_strong}}, 
-               "High Confidence LoF"
-            ;
-        }elsif($csq_to_report->{lof} eq 'LC'){
+               "High Confidence LoF";
+            $is_lof = "HC_LoF";
+        }elsif($csq_to_report->{lof} and $csq_to_report->{lof} eq 'LC'){
             my $f = $csq_to_report->{lof_filter} || '';
             push @{$pathogenic_criteria{very_strong}}, 
-               "Low Confidence LoF: $f"
-            ;
+               "Low Confidence LoF: $f";
+            $is_lof = "LC_LoF";
+        }else{
+            $is_lof = "Potential_LoF";
         }
     }
     #TODO check stop losses or run ons
     
+    #if same as previously reported DM = strong evidence
+    foreach my $m (@h_matches){
+        my $criteria;
+        if ($m->{variant_class} eq 'DM'){
+            $is_dm = "HGMD_DM";
+            $criteria = 'strong';
+        }else{
+            $is_other = "HGMD_Other";
+            $criteria = 'other';
+        }
+        push @{$pathogenic_criteria{$criteria}}, 
+          join(":", "HGMD variant", 
+                        map { $m->{$_} } 
+                        qw /
+                            hgmd_id
+                            variant_class
+                            disease
+                            hgvsc
+                            hgvsp
+                        /
+              );
+    }
+    foreach my $m (@c_matches ){
+        my $criteria ;
+        if ($m->{pathogenic} == 1 and $m->{conflicted} == 0 ){ 
+            $is_dm ||= "ClinVarPathogenic";
+            $criteria = 'strong';
+        }else{
+            $is_other = "ClinVarOther";
+            $criteria = 'other';
+        }
+        push @{$pathogenic_criteria{$criteria}}, 
+          join(":", "ClinVar variant", 
+                    map { $m->{$_} } 
+                    qw /
+                        measureset_id
+                        clinical_significance
+                        all_traits
+                        hgvsc
+                        hgvsp
+                    /
+          );
+    }
+    if ($is_dm){
+        $pathogenic_score{strong}++;
+    }
+     
     if ($most_damaging_csq eq 'missense_variant' or 
         $most_damaging_csq eq 'protein_altering_variant' or 
         $most_damaging_csq =~  /^inframe_(inser|dele)tion$/ 
@@ -907,10 +906,16 @@ sub writeToSheet{
                 $csq_to_report->{sift} =~ /deleterious/i
             ){
                 $pathogenic_score{supporting}++;
+                push @{$pathogenic_criteria{supporting}}, 
+                    "Polyphen=$csq_to_report->{polyphen}, SIFT=$csq_to_report->{sift}, CADD > 10";
+                $is_damaging = "damaging_$most_damaging_csq";
             }
         }else{
             if ($allele_cadd >= 10){
                 $pathogenic_score{supporting}++;
+                push @{$pathogenic_criteria{supporting}}, 
+                    "CADD > 10";
+                $is_damaging = "damaging_$most_damaging_csq";
             }
         } 
         #check if same amino acid change as previously reported variant
@@ -926,6 +931,7 @@ sub writeToSheet{
           $search_handles{hgmd_aa} -> errstr;
         while (my @db_row = $search_handles{hgmd_aa}->fetchrow_array()) {
             my ($hgmd_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
+            next if ($hgmd_id and grep {$_->{hgmd_id} eq $hgmd_id} @h_matches );
             my $criteria = 'moderate';
             my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
@@ -952,6 +958,7 @@ sub writeToSheet{
           $search_handles{clinvar_aa} -> errstr;
         while (my @db_row = $search_handles{clinvar_aa}->fetchrow_array()) {
             my ($clinvar_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
+            next if (grep {$_->{measureset_id} eq $clinvar_id} @c_matches );
             my $criteria = 'moderate';
             my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
@@ -975,41 +982,8 @@ sub writeToSheet{
         foreach my $c (keys %criteria_matched){
             $pathogenic_score{$c}++ ;
         }
-    }else{
-    #if not a missense/inframe indel but same as previously reported DM = strong evidence
-        if ($var_class and ($var_class eq 'HGMD_DM' or $var_class eq "ClinVarPathogenic")){
-            $pathogenic_score{strong}++ ;
-            if (@h_matches){
-                foreach my $m (@h_matches){
-                    push @{$pathogenic_criteria{strong}}, 
-                      join(":", "HGMD variant", 
-                                map { $m->{$_} } 
-                                qw /
-                                    hgmd_id
-                                    variant_class
-                                    disease
-                                    hgvsc
-                                    hgvsp
-                                /
-                      );
-                }
-            }
-            foreach my $m (@c_matches){
-                push @{$pathogenic_criteria{strong}}, 
-                  join(":", "ClinVar variant", 
-                            map { $m->{$_} } 
-                            qw /
-                                measureset_id
-                                clinical_significance
-                                all_traits
-                                hgvsc
-                                hgvsp
-                            /
-                  );
-            }
-        }
     }
-                
+               
     if (%af_info_fields){ #moderate support if absent from ExAC and EVS 
         my $missing_fields = 0;
         my $present_in_db = 0;
@@ -1055,7 +1029,85 @@ sub writeToSheet{
     #choose sheet to write to
     my $s_name = classifyPathogenicity(\%pathogenic_score);
 ##############END OF ACMG SCORING##################
+###ASSIGN $var_class
+    if ($is_dm){
+        $var_class = $is_dm;
+    }elsif($is_lof){
+        $var_class = $is_lof;
+    }elsif(exists $csq_to_report->{rule}){
+        $var_class = 'RuleMatched';
+    }elsif (exists $csq_to_report->{glyxy} ){
+        $var_class = 'GlyXY';
+    }elsif($is_damaging){
+        $var_class = $is_damaging;
+    }elsif($is_other){
+        $var_class = $is_other;
+    }else{
+        $var_class = 'Other';
+    }
     
+##############ADD VALUES TO ROW FROM SPREADSHEET##
+    if (@h_matches){
+        foreach my $f 
+        ( qw /
+                hgmd_id
+                disease
+                variant_class
+                gene_symbol
+                hgvs
+            /
+        ){#add HGMD results to row, multiple values per field separated by commas
+            my $s = join(",", map { $_->{$f} } @h_matches );
+            push @row, $s;
+        }
+    }else{
+        push @row, map {"-"} (1..5); 
+    }
+    
+    #collect ClinVar database annotations if found
+    if (@c_matches){
+        foreach my $f 
+        ( qw /
+                measureset_id
+                clinical_significance 
+                all_traits 
+                conflicted 
+            /
+        ){#add ClinVar results to row, multiple values per field separated by commas
+            my $s = join(",", map { $_->{$f} } @c_matches );
+            push @row, $s;
+        }
+    }else{
+        push @row, map {"-"} (1..4); 
+    }
+
+    #get 'most damaging' variant found in transcripts, if same 'damaging' score
+    # for multiple transcripts return the variant in the highest ranked transcript
+    if ($opts{rules}){
+        my $o = $csq_to_report->{rule};
+        $o ||= '';
+        push @row, $o;
+    }
+    if ($opts{t}){
+        my $o = $csq_to_report->{overlap_features};
+        $o ||= '';
+        push @row, $o;
+    }
+
+
+    #add standard VCF fields from this allele only
+    foreach my $f ( qw / CHROM ORIGINAL_POS ORIGINAL_REF ORIGINAL_ALT / ){
+        push @row, $var->{$f};
+    }
+    push @row, VcfReader::getVariantField($l, 'ID');
+    push @row, VcfReader::getVariantField($l, 'QUAL');
+    push @row, VcfReader::getVariantField($l, 'FILTER');
+
+    my @vep_fields = (qw / symbol feature consequence hgvsc hgvsp exon intron / );
+    foreach my $f (@vep_fields){
+        push @row, $csq_to_report->{$f};
+    }
+
     push @row, $csq_to_report->{domains};
     push @row, $csq_to_report->{glyxy_pos};
     push @row, $csq_to_report->{domain_coords};
@@ -1069,17 +1121,17 @@ sub writeToSheet{
 
     push @row, $allele_cadd;
     #add variant score/classifcaiton/info to beginning of row
-        my $path_score = 0;
-        my @score_string = ();
-        my @criteria_string = ();
-        my @cats = (
-            qw /
-                other
-                supporting 
-                moderate   
-                strong      
-                very_strong 
-            /
+    my $path_score = 0;
+    my @score_string = ();
+    my @criteria_string = ();
+    my @cats = (
+        qw /
+            other
+            supporting 
+            moderate   
+            strong      
+            very_strong 
+        /
         );
         for (my $i = $#cats; $i >= 0; $i--){
             push @score_string, "$cats[$i]: $pathogenic_score{$cats[$i]}";
@@ -1196,10 +1248,9 @@ sub writeToSheet{
                 }
             }
             push @split_cells, \@sample_cells;
-            $var_class ||= $s_name; 
             {
                 no warnings 'uninitialized';
-                push @{$sample_vars{$s}->{$var_class}}, [$allele_cadd, @sample_cells, $var_class, @row, ];
+                push @{$sample_vars{$s}->{$s_name}}, [$path_score, $allele_cadd, @sample_cells, $s_name, @row, ];
             }
         }
     }
@@ -1210,6 +1261,7 @@ sub writeToSheet{
         if ($opts{1}){
             $s_name = 'Variants';
         }
+        unshift @row, $var_class;
         unshift @row, $category;
         if ($opts{x}){ #do not merge
             foreach my $s (@split_cells){
@@ -1537,12 +1589,13 @@ sub getHeaders{
     @{$h{Variants}} =  ( #header for all variant sheets
         qw/
             Category
+            Class
             Score
             ScoreBreakdown
             Criteria
             Hgmd_ID
             Disease
-            variant_class
+            HGMD_variant_class
             HGMD_Symbol
             HGVS
             ClinVar_ID
@@ -1759,6 +1812,7 @@ sub getHeaders{
             PL
             UID
             Category
+            Class
             Score
             ScoreBreakdown
             Criteria
