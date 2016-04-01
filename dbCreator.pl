@@ -11,6 +11,7 @@ use Term::ProgressBar;
 use POSIX qw/strftime/;
 use HTTP::Tiny;
 use URI::Encode qw (uri_decode);
+use File::Tee qw(tee);
 use FindBin;
 use lib "$FindBin::Bin/lib/vcfhacks/lib";
 use IdParser;
@@ -29,6 +30,7 @@ GetOptions(
     'm|hgmd=s', #optional HGMD VEP annotated VCF for creation of HGMD variant table
     'c|clinvar=s', #optional ClinVar VEP annotated VCF for creation of ClinVar variant table
     'a|assembly=s', #optional - specify assembly for HGMD consequences - default = GRCh37
+    'x|error_log=s',#optional log file for printing messages
     'q|quiet',
     'h|?|help',
 ) or usage("Syntax error");
@@ -40,7 +42,9 @@ usage("Error: please specify a filename for your database using the --db option!
 $opts{s} = "human" if not $opts{s};
 $opts{a} = "GRCh37" if not $opts{a};
 
-
+if ($opts{x}){#write to log if specified
+    tee(STDERR, '>>', $opts{x});
+}
 #set up database
 if (-e $opts{d}){
     informUser("INFO: --db file '$opts{d}' already exists - additional data will be appended to this database file\n");
@@ -97,11 +101,6 @@ $dbh->disconnect();
 
 #########################################################
 sub outputHgmdInfo{
-    return if not $opts{m};
-    my $FH = VcfReader::openVcf($opts{m}); 
-    my @vhead = VcfReader::getHeader($opts{m});
-    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
-    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
     my @hgmd_fields =  qw /
             hgmd_id
             disease
@@ -186,6 +185,11 @@ sub outputHgmdInfo{
     );
     informUser("Adding local HGMD data to 'HGMD' and 'HGMD_VEP' table of $opts{d}.\n");
     createTable('HGMD', \@clin_fields, \%f_to_prop);
+    return if not $opts{m};#if not specified create the empty table and return
+    my $FH = VcfReader::openVcf($opts{m}); 
+    my @vhead = VcfReader::getHeader($opts{m});
+    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
+    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
     my $clin_insert_query = getInsertionQuery("HGMD", \@clin_fields); 
     my $clin_select_query = getSelectQuery("HGMD", \@clin_fields); 
     my $clin_insth= $dbh->prepare( $clin_insert_query );
@@ -252,11 +256,6 @@ sub outputHgmdInfo{
 
 #########################################################
 sub outputClinvarInfo{
-    return if not $opts{c};
-    my $FH = VcfReader::openVcf($opts{c}); 
-    my @vhead = VcfReader::getHeader($opts{c});
-    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
-    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
     my @clinvar_fields =  qw /
                 measureset_id
                 symbol
@@ -355,6 +354,11 @@ sub outputClinvarInfo{
     );
     informUser("Adding local ClinVar data to 'ClinVar' and 'ClinVar_VEP' tables of $opts{d}.\n");
     createTable('ClinVar', \@clin_fields, \%f_to_prop);
+    return if not $opts{c};
+    my $FH = VcfReader::openVcf($opts{c}); 
+    my @vhead = VcfReader::getHeader($opts{c});
+    die "VCF header not OK for $opts{m}\n" if not VcfReader::checkHeader(header => \@vhead);
+    my %vep_fields = VcfReader::readVepHeader(header => \@vhead);
     my $clin_insert_query = getInsertionQuery("ClinVar", \@clin_fields); 
     my $clin_select_query = getSelectQuery("ClinVar", \@clin_fields); 
     my $clin_insth= $dbh->prepare( $clin_insert_query );
@@ -491,12 +495,15 @@ sub parseCddFeats{
             my @coords = sort { $a <=> $b } 
                          map { s/^[A-Z]+//g; $_ } 
                          split(/[\,\-]/, $s[3]);
-            my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
-            (
-                ids   => $uniprot_to_ensp{$u},
-                start => $coords[0],
-                end   => $coords[-1],
-            ); 
+            my ($grch37_pos, $grch38_pos ) = ("", "");
+            if ( $uniprot_to_ensp{$u} and ref $uniprot_to_ensp{$u} eq 'ARRAY'){
+                ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+                (
+                    ids   => $uniprot_to_ensp{$u},
+                    start => $coords[0],
+                    end   => $coords[-1],
+                );
+            } 
             my @values = (
                 $u,
                 $name, 
@@ -541,12 +548,15 @@ sub parseCddHits{
         if ($s[0] =~ /Q\#\d+ - (\S+)/){
             my $u = $1;
             my $name = $uniprot_to_genename{$u};
-            my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
-            (
-                ids   => $uniprot_to_ensp{$u},
-                start => $s[3],
-                end   => $s[4],
-            ); 
+            my ($grch37_pos, $grch38_pos ) = ("", "");
+            if ( $uniprot_to_ensp{$u} and ref $uniprot_to_ensp{$u} eq 'ARRAY'){
+                ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+                (
+                    ids   => $uniprot_to_ensp{$u},
+                    start => $s[3],
+                    end   => $s[4],
+                ); 
+            }
             my @values = (
                 $u,
                 $name, 
@@ -720,12 +730,15 @@ sub outputUniprotInfo{
             my ($start, $end) = split('-', $k);
             foreach my $f (@{$uniprot_info{$id}->{$k}}){
                 my ($feature, $note) = split(/\|/, $f );
-                my ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
-                (
-                    ids   => $uniprot_to_ensp{$id},
-                    start => $start,
-                    end   => $end,
-                ); 
+                my ($grch37_pos, $grch38_pos ) = ("", "");
+                if ($uniprot_to_ensp{$id} and ref $uniprot_to_ensp{$id} eq 'ARRAY'){
+                    ($grch37_pos, $grch38_pos ) = genomicPosFromEnsp
+                    (
+                        ids   => $uniprot_to_ensp{$id},
+                        start => $start,
+                        end   => $end,
+                    ); 
+                }
                 my @values = 
                 (
                     $name,
