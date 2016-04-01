@@ -834,7 +834,7 @@ sub getGenomicRegionsFromEnsp{
     if (not exists $coords->{mappings} or 
         ref $coords->{mappings} ne 'ARRAY'){
         informUser("WARNING: Could not map genomic coordinates ".
-                   "for $args{id} $args{start}-$args{end} - server ".
+                   "for $args{id} $args{start}-$args{end} ($args{assembly}) - server ".
                    "did not return an ARRAY reference.\n"
         );
     }else{
