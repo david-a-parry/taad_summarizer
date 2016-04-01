@@ -1146,6 +1146,7 @@ sub writeToSheet{
     unshift @row, join("\n", @criteria_string);
     unshift @row, join("\n", @score_string);
     unshift @row, $path_score;
+    unshift @row, $var_class;
     my $uid_base = sprintf
         (
             "%s:%s-%s/%s-", 
@@ -1264,7 +1265,6 @@ sub writeToSheet{
         if ($opts{1}){
             $s_name = 'Variants';
         }
-        unshift @row, $var_class;
         unshift @row, $category;
         if ($opts{x}){ #do not merge
             foreach my $s (@split_cells){
