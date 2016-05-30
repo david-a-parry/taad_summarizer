@@ -240,7 +240,7 @@ sub readTranscriptDatabase{
 
         hgmd_aa =>  $dbh->prepare
         (
-            qq{ select hgmd_id, feature, protein_position, amino_acids, hgvsc, hgvsp
+            qq{ select hgmd_id, feature, consequence, protein_position, amino_acids, hgvsc, hgvsp
                  FROM HGMD_VEP
                 WHERE feature == ? 
                 and protein_position == ? 
@@ -276,7 +276,7 @@ sub readTranscriptDatabase{
 
         clinvar_aa =>  $dbh->prepare
         (
-            qq{ select measureset_id, feature, protein_position, amino_acids, hgvsc, hgvsp
+            qq{ select measureset_id, feature, consequence, protein_position, amino_acids, hgvsc, hgvsp
                 FROM ClinVar_VEP
                 WHERE feature == ? 
                 and protein_position == ? 
@@ -934,8 +934,16 @@ sub writeToSheet{
         ) or die "Error searching 'HGMD_VEP' table in '$opts{t}': " . 
           $search_handles{hgmd_aa} -> errstr;
         while (my @db_row = $search_handles{hgmd_aa}->fetchrow_array()) {
-            my ($hgmd_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
+            my ($hgmd_id, $feature, $consequence, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
             next if ($hgmd_id and grep {$_->{hgmd_id} eq $hgmd_id} @h_matches );
+            my @s_csq = split("&", $consequence); 
+            @s_csq = sort { $so_ranks{$a} <=> $so_ranks{$b} } @s_csq;
+            if ($s_csq[0] ne 'missense_variant' and 
+                $s_csq[0] ne 'protein_altering_variant' and 
+                $s_csq[0] !~  /^inframe_(inser|dele)tion$/
+            ){
+                next;
+            }
             my $criteria = 'moderate';
             my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
@@ -961,8 +969,16 @@ sub writeToSheet{
         ) or die "Error searching 'ClinVar_VEP' table in '$opts{t}': " . 
           $search_handles{clinvar_aa} -> errstr;
         while (my @db_row = $search_handles{clinvar_aa}->fetchrow_array()) {
-            my ($clinvar_id, $feature, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
+            my ($clinvar_id, $feature, $consequence, $protein_position, $aa, $hgvsc, $hgvsp) = @db_row; 
             next if (grep {$_->{measureset_id} eq $clinvar_id} @c_matches );
+            my @s_csq = split("&", $consequence); 
+            @s_csq = sort { $so_ranks{$a} <=> $so_ranks{$b} } @s_csq;
+            if ($s_csq[0] ne 'missense_variant' and 
+                $s_csq[0] ne 'protein_altering_variant' and 
+                $s_csq[0] !~  /^inframe_(inser|dele)tion$/
+            ){
+                next;
+            }
             my $criteria = 'moderate';
             my $desc = "same AA altered";
             if ($aa eq $csq_to_report->{amino_acids}){
