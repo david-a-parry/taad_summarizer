@@ -185,6 +185,7 @@ sub outputHgmdInfo{
     );
     informUser("Adding local HGMD data to 'HGMD' and 'HGMD_VEP' table of $opts{d}.\n");
     createTable('HGMD', \@clin_fields, \%f_to_prop);
+    createTable('HGMD_VEP', \@csq_fields, \%f_to_prop);
     return if not $opts{m};#if not specified create the empty table and return
     my $FH = VcfReader::openVcf($opts{m}); 
     my @vhead = VcfReader::getHeader($opts{m});
@@ -194,7 +195,6 @@ sub outputHgmdInfo{
     my $clin_select_query = getSelectQuery("HGMD", \@clin_fields); 
     my $clin_insth= $dbh->prepare( $clin_insert_query );
     my $clin_selth= $dbh->prepare( $clin_select_query );
-    createTable('HGMD_VEP', \@csq_fields, \%f_to_prop);
     my $csq_insert_query = getInsertionQuery("HGMD_VEP", \@csq_fields); 
     my $csq_select_query = getSelectQuery("HGMD_VEP", \@csq_fields); 
     my $csq_insth= $dbh->prepare( $csq_insert_query );
@@ -819,6 +819,46 @@ sub genomicPosFromEnsp{
             join("\n", keys %grch38_pos) . "\n"
         );
     }
+    if (not keys(%grch37_pos)){
+        informUser(
+            "WARNING: No genomic positions found for ".
+            join ("/", @{$args{ids}} ) . " $args{start}-$args{end} for GRCh37.\n"
+        );
+        if (keys %grch38_pos){
+            informUser(
+                "WARNING: Attempting to map found GRCh38 coordinates to GRCh37\n"
+            );
+            if (my $regions = convertAssemblyCoordinates
+                (
+                    "GRCh38",
+                    "GRCh37",
+                    [keys %grch38_pos],
+                )
+            ){
+                $grch37_pos{$regions} = undef;
+            }
+        }
+    }
+    if (not keys(%grch38_pos)){
+        informUser(
+            "WARNING: No genomic positions found for ".
+            join ("/", @{$args{ids}} ) . " $args{start}-$args{end} for GRCh38.\n"
+        );
+        if (keys %grch37_pos){
+            informUser(
+                "WARNING: Attempting to map found GRCh37 coordinates to GRCh38\n"
+            );
+            if (my $regions =convertAssemblyCoordinates 
+                (
+                    "GRCh37",
+                    "GRCh38",
+                    [keys %grch38_pos],
+                )
+            ){
+                $grch38_pos{$regions} = undef;
+            }
+        }
+    }
     return 
     (
         join(";", keys %grch37_pos), 
@@ -826,6 +866,26 @@ sub genomicPosFromEnsp{
     );
 }
 
+#########################################################
+sub convertAssemblyCoordinates{
+    my ($original, $new, $regions) = @_;
+    my @pos = (); 
+    foreach my $r (@$regions){
+        my $endpoint = "map/human/$original/$r:1/$new";
+        my $coords = $restQuery->queryEndpoint($endpoint);
+        if (ref $coords eq 'HASH'){
+            foreach my $map (@{$coords->{mappings}}){
+                push @pos, sprintf
+                (   "%s:%s-%s",
+                    $map->{mapped}->{seq_region_name},
+                    $map->{mapped}->{start},
+                    $map->{mapped}->{end},
+                ); 
+            }
+        }
+    }
+    return join(";", @pos);
+}
 #########################################################
 sub getGenomicRegionsFromEnsp{
     my %args = @_;
