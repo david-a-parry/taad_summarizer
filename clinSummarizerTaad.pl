@@ -1619,8 +1619,8 @@ sub getHeaders{
             HGVS
             ClinVar_ID
             ClinVarSig
-            ClinVarConflicted
             ClinVarTrait
+            ClinVarConflicted
             Chrom
             Pos
             Ref
@@ -1842,8 +1842,8 @@ sub getHeaders{
             HGVS
             ClinVar_ID
             ClinVarSig
-            ClinVarConflicted
             ClinVarTrait
+            ClinVarConflicted
             Chrom
             Pos
             Ref
