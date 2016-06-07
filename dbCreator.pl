@@ -22,23 +22,29 @@ my @gene_ids = ();
 my %opts = ( i => \@gene_ids);
 GetOptions(
     \%opts,
-    'l|list=s',
-    'i|id=s{,}',#  => \@gene_ids,
-    'd|db=s', #sqlite database output
-    's|species=s',
-    'e|et_folder=s',#optional evolutionary trace folder containing protein predictions
-    'm|hgmd=s', #optional HGMD VEP annotated VCF for creation of HGMD variant table
-    'c|clinvar=s', #optional ClinVar VEP annotated VCF for creation of ClinVar variant table
     'a|assembly=s', #optional - specify assembly for HGMD consequences - default = GRCh37
-    'x|error_log=s',#optional log file for printing messages
-    'q|quiet',
+    'c|clinvar=s', #optional ClinVar VEP annotated VCF for creation of ClinVar variant table
+    'd|db=s', #sqlite database output
+    'e|et_folder=s',#optional evolutionary trace folder containing protein predictions
     'h|?|help',
+    'i|id=s{,}',#  => \@gene_ids,
+    'l|list=s',
+    'm|hgmd=s', #optional HGMD VEP annotated VCF for creation of HGMD variant table
+    'n|domain_search_only:i', #flag to only perform CDD search on a pre-existing database
+    'q|quiet',
+    's|species=s',
+    'x|error_log=s',#optional log file for printing messages
 ) or usage("Syntax error");
 
 usage() if $opts{h};
-usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
-usage("Error: please specify a filename for your database using the --db option!\n") 
-    if not $opts{d};
+if (not defined $opts{n}){
+    usage("Error: a gene list or gene ID must be provided") if not $opts{i} and not $opts{l};
+    usage("Error: please specify a filename for your database using the --db option!\n") 
+        if not $opts{d};
+}else{
+    usage("Error: please specify a pre-existing database using the --db option!\n") 
+        if not $opts{d};
+}
 $opts{s} = "human" if not $opts{s};
 $opts{a} = "GRCh37" if not $opts{a};
 
@@ -48,7 +54,6 @@ if ($opts{x}){#write to log if specified
 #set up database
 if (-e $opts{d}){
     informUser("INFO: --db file '$opts{d}' already exists - additional data will be appended to this database file\n");
-    #should really amend this so that appending is possible, not a priority yet though
 }
 my $driver   = "SQLite";
 my $max_commit = 5000;
@@ -72,6 +77,12 @@ my %uniprot_to_ensp = ();
 my %enst_to_uniprot = ();
 my %mappings = (); #protein pos mappings to prevent redundant lookups
                 #key = protein id -> assembly -> start -> end = coordinate 
+
+if (defined $opts{n}){#only do CDD search (e.g. if has failed previously)
+    getUniprotIdsFromDatabase();
+    retrieveAndOutputCddInfo();
+    exit;
+}
 
 if ($opts{l}){
     push @gene_ids, readList();
@@ -97,7 +108,26 @@ outputUniprotInfo() ;
 
 retrieveAndOutputCddInfo() ; 
 
-$dbh->disconnect(); 
+END{
+    if ($dbh){
+        $dbh->disconnect(); 
+    }
+}
+
+#########################################################
+sub getUniprotIdsFromDatabase{
+    my %tables = map {$_ => undef} $dbh->tables;
+    foreach my $t ( qw / transcripts uniprot HGMD_VEP ClinVar_VEP/ ){
+        if (not exists $tables{"\"main\".\"$t\""}){
+            die "ERROR: Could not find table '$t' in $opts{t} - did dbCreator.pl create these tables successfully on a previous run?\n";
+        }
+    }
+    my $sth = $dbh->prepare("select DISTINCT UniprotId FROM uniprot");
+    $sth->execute();
+    while (my @db_row = $sth->fetchrow_array()){
+        $uniprot_info{$db_row[0]}++;
+    }
+}
 
 #########################################################
 sub outputHgmdInfo{
@@ -583,8 +613,6 @@ sub parseCddHits{
 
 #########################################################
 sub retrieveAndOutputCddInfo{
-    my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
-    my $hits  = retrieveCddFeatures([keys %uniprot_info], 'hits');
     my @fields = qw / 
                  UniprotId   
                  symbol 
@@ -608,8 +636,21 @@ sub retrieveAndOutputCddInfo{
                  GRCh38Pos   => "TEXT",
                  );
     createTable('cdd', \@fields, \%f_to_prop);
-    informUser("Adding data retrieved from CDD to 'cdd' table of $opts{d}.\n");
-    parseCddFeats($feats, \@fields);
+    unless ($opts{n} == 1){
+        my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
+        informUser
+        (
+            "Adding data retrieved from CDD 'feats' search to 'cdd' table of ".
+            "$opts{d}.\n"
+        );
+        parseCddFeats($feats, \@fields) unless $opts{n} == 1;
+    }
+    informUser
+    (
+        "Adding data retrieved from CDD 'hits' search to 'cdd' table of ".
+        "$opts{d}.\n"
+    );
+    my $hits  = retrieveCddFeatures([keys %uniprot_info], 'hits');
     parseCddHits($hits, \@fields);
 }
 
@@ -1416,15 +1457,51 @@ sub usage{
     Options:
 
     -l, --list FILE
-        Input file of gene/transcript/protein IDs one per line. Any whitespace following the first word of each line will be ignored.
+        Input file of gene/transcript/protein IDs one per line. Any whitespace 
+        following the first word of each line will be ignored.
+
     -i, --ids
-        One or more gene/transcript/protein identifiers to look up. May be used instead or as well as --list file.
-    -d, --db FILE
+        One or more gene/transcript/protein identifiers to look up. May be 
+        used instead or as well as --list file.
+
+    -d, --db
         Output file for database. Required.
+
     -s, --species
-        Species to search (only applies to non-Ensembl identifiers). Default = human.
+        Species to search (only applies to non-Ensembl identifiers). 
+        Default = human.
+
+    -c, --clinvar
+        Optional ClinVar VEP annotated VCF for creation of ClinVar table.
+
+    -m, --hgmd
+        Optional HGMD VEP annotated VCF for creation of HGMD variant table.
+
+    -e, --et_folder
+        Optional evolutionary trace folder containing protein predictions
+
+    -n, --domain_search_only
+        Flag to only perform CDD search on a pre-existing database. Because 
+        this step frequently errors/times out this option is provided to allow 
+        the resumption of a run where all the steps previous to the CDD search 
+        have succeeded. 
+
+        By default both CDD 'feats' and 'hits' searches will be performed. To 
+        only perform the 'hits' search (i.e. if only the CDD hits search failed
+        previously) add 1 after this flag (i.e. '-n 1').
+
+    -a, --assembly
+        Optional assembly for HGMD consequences - default = GRCh37
+
+    -q, --quiet
+        Supress messages printed to STDERR
+
+    -x, --error_log
+        Optional log file for printing messages. For debugging/checkinga a run
+        has succeeded.
+    
     -?, -h, --help
-        Show this help message.
+        Show this help message and exit.
 
 
     Information:
