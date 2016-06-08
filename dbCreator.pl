@@ -122,10 +122,24 @@ sub getUniprotIdsFromDatabase{
             die "ERROR: Could not find table '$t' in $opts{t} - did dbCreator.pl create these tables successfully on a previous run?\n";
         }
     }
-    my $sth = $dbh->prepare("select DISTINCT UniprotId FROM uniprot");
-    $sth->execute();
-    while (my @db_row = $sth->fetchrow_array()){
-        $uniprot_info{$db_row[0]}++;
+    if (not @gene_ids){
+        my $sth = $dbh->prepare("select DISTINCT UniprotId FROM uniprot");
+        $sth->execute();
+        while (my @db_row = $sth->fetchrow_array()){
+            $uniprot_info{$db_row[0]}++;
+        }
+    }else{
+        getGenesFromIds();
+        my $sth = $dbh->prepare("select DISTINCT UniprotId FROM uniprot WHERE GeneName == ?");
+        if (not %genes){
+            die "Nothing to do!\n";
+        }
+        foreach my $g (keys %genes){
+            $sth->execute($genes{$g}->{display_name});
+            while (my @db_row = $sth->fetchrow_array()){
+                $uniprot_info{$db_row[0]}++;
+            }
+        }
     }
 }
 
@@ -631,12 +645,12 @@ sub retrieveAndOutputCddInfo{
                  Feature     => "TEXT",
                  Residues    => "TEXT",
                  Start       => "INT not null",
-                 End       => "INT not null",
+                 End         => "INT not null",
                  GRCh37Pos   => "TEXT",
                  GRCh38Pos   => "TEXT",
                  );
     createTable('cdd', \@fields, \%f_to_prop);
-    unless ($opts{n} == 1){
+    unless (defined $opts{n} and $opts{n} == 1){
         my $feats = retrieveCddFeatures([keys %uniprot_info], 'feats');
         informUser
         (
@@ -726,10 +740,21 @@ sub retrieveCddFeatures{
             'cdsid'  => $rid
         ],
     );
-    die "Error: ", $response->{status}
-      unless $response->{success};
-
-    return $response->{content};
+    return $response->{content} if $response->{success};
+    informUser("Error retrieving CDD search results: ", $response->{status} );
+    for (my $i = 0; $i < 10; $i++){
+        informUser("Attempting retry " . ($i + 1) ." of 10 in 5 seconds...");
+        sleep(5);
+        $response = $http->post_form(
+            $url,
+            [
+                'cdsid'  => $rid
+            ],
+        );
+        return $response->{content} if $response->{success};
+        informUser("Error: ", $response->{status} );
+    }
+    die "Error retrieving CDD search results after 10 retries";
 }
 
 
