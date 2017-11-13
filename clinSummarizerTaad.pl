@@ -14,7 +14,6 @@ use List::Util qw(first sum max);
 use Pod::Usage;
 use File::Basename;
 use FindBin;
-use Tabix; 
 use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
 use HTTP::Tiny;
 use JSON;
@@ -36,6 +35,7 @@ GetOptions(
     'g|gq=f',            #min GQ quality for calls
     'h|?|help',
     'i|input=s',        #vcf input
+    'keep_unvalidated', #still retain variants even if validation status is '2' (did not validate'
     'manual',
     'n|no_blanks',      #no blank samples
     'o|output=s',       #xlsx output
@@ -390,7 +390,24 @@ sub writeSampleSummary{
         # likely pathogenic 
         my @csq = sort byCsqClass keys %{$sample_vars{$s}}; 
         if (not @csq){ #no variants for this sample
-            push @{ $most_damaging{NONE} }, [0, 0, $s]; 
+            my @no_var = (0, 0, $s); 
+            #output a line with empty GT fields etc. 
+            push @no_var, map {"-"} 1..6;
+            #but including phenotype info if present
+            if (%validated){
+                push @no_var , "-";
+            }
+            if ($opts{phenotype_file}){
+                #search phenotypes
+                foreach my $ph (@pheno_fields){
+                    if (exists $phenotypes->{$s}){
+                        push @no_var, $phenotypes->{$s}->{$ph};
+                    }else{
+                        push @no_var, '-';
+                    }
+                }
+            }
+            push @{ $most_damaging{NONE} }, \@no_var;
         }else{
             if (@{$sample_vars{$s}->{$csq[0]}} > 1){ 
             #if multiple variants with most damaging category choose 
@@ -431,7 +448,7 @@ sub byCsqClass{
     if ($a eq $b){
         return 0;
     }
-    foreach my $class ("Pathogenic", "Likely Pathogenic", "Uncertain Significance"){
+    foreach my $class ("Pathogenic", "Likely Pathogenic", "Uncertain Significance", "NONE"){
         if ($a eq "$class"){
             return -1;
         }elsif ($b eq "$class"){
@@ -443,19 +460,6 @@ sub byCsqClass{
         
 
 
-
-###########################################################
-sub getClinVarSearchArgs{
-    return if not $opts{c};
-    #use bgzip compressed version of clinvar file from https://github.com/macarthur-lab/clinvar
-    informUser("Checking ClinVar\n");
-    my ($bgz, $clinVarCols) = checkClinvarFile($opts{c});
-    my $index = "$bgz.tbi";
-    my $iterator = Tabix->new(-data =>  $bgz, -index => $index) ;
-    my %sargs = ( tabix_iterator => $iterator, columns => $clinVarCols ); 
-    return %sargs;
-}
-
 ###########################################################
 sub readPhenotypeFile{
     my %pheno = (); #key is variant unique ID, value is anon hash of phenotype info
@@ -463,13 +467,19 @@ sub readPhenotypeFile{
       or die "Can't open phenotype file $opts{phenotype_file}: $!\n";
     chomp (my $header= <$PHENO>);
     $header =~ s/^#+//;
-    my %cols = getColumns($header, 1, ',');
+    my $delimiter = '';
+    my %cols = ();
+    foreach my $d (",", "\t",){
+        $delimiter = $d;
+        %cols = getColumns($header, 1, $d);
+        last if exists $cols{sample_id};
+    }
     if (not exists $cols{sample_id}){
         die "Could not find required column 'sample_id' in phenotype file!\n";
     }
     while ( my $line = <$PHENO> ){
         chomp $line;
-        my @split = split(",", $line); 
+        my @split = split($delimiter, $line); 
         foreach my $f (sort keys %cols){
             next if $f eq 'sample_id';
             $pheno{$split[ $cols{sample_id} ] } ->{$f} = $split[ $cols{$f} ] ;
@@ -486,8 +496,8 @@ sub readValidationsFile{
     open (my $VAL, $opts{validations_file}) 
       or die "Can't open validations file $opts{validations_file}: $!\n";
     my $header= <$VAL>;
-    my %cols = getColumns($header);
-    my @fields =  qw / UID VALIDATED / ;
+    my %cols = getColumns($header, 1);
+    my @fields =  qw / uid validated / ;
     foreach my $f (@fields){
         if (not exists $cols{$f}){
             die "Could not find required column '$f' in validation file!\n";
@@ -496,7 +506,7 @@ sub readValidationsFile{
     while ( my $line = <$VAL> ){
         chomp $line;
         my @split = split("\t", $line); 
-        $val{$split[ $cols{UID} ] } = $split[ $cols{VALIDATED} ] ;
+        $val{$split[ $cols{uid} ] } = $split[ $cols{validated} ] ;
     }
     close $VAL;
     return %val;
@@ -1239,7 +1249,6 @@ sub writeToSheet{
                     next if $ab > $opts{b}->[1];
                 }
             }
-            $variant_has_valid_sample++;
             my $uid = "$uid_base$s";
             my @sample_cells = ( $s, $samp_gts{$s}, join(",", @ads) , $ab, $samp_gqs{$s}, $samp_pls{$s},  $uid );
             if (@primers){
@@ -1252,11 +1261,15 @@ sub writeToSheet{
             if (%validated){
                 #search validations
                 if (exists $validated{$uid}){
+                    if ($validated{$uid} == 2){#did not validate - skip
+                        next unless $opts{keep_unvalidated};
+                    }
                     push @sample_cells, $validated{$uid};
                 }else{
                     push @sample_cells, 0;
                 }
             }
+            $variant_has_valid_sample++;
             if ($opts{phenotype_file}){
                 #search phenotypes
                 foreach my $ph (@pheno_fields){
@@ -1333,7 +1346,7 @@ sub classifyPathogenicity{
     if ($p_hash->{moderate} >= 1 and $p_hash->{supporting} >= 4){
         return 'Likely Pathogenic';
     }
-    if ($p_hash->{moderate} >= 1){
+    if ($p_hash->{moderate} >= 1 or $p_hash->{supporting} >= 1){
         return 'Uncertain Significance';
     }
     
@@ -1902,11 +1915,11 @@ sub getHeaders{
     }
     if ($opts{rules}){
         splice (@{$h{Variants}}, $v_spl++, 0, "RuleMatched"); 
-        splice (@{$h{mostdamaging}}, 9 + $md_spl++, 0, "RuleMatched"); 
+        splice (@{$h{mostdamaging}}, 14 + $md_spl++, 0, "RuleMatched"); 
     }
     if ($opts{t}){
         splice (@{$h{Variants}}, $v_spl++, 0, "Uniprot/CDD_Features"); 
-        splice (@{$h{mostdamaging}}, 9 + $md_spl++, 0, "Uniprot/CDD_Features"); 
+        splice (@{$h{mostdamaging}}, 14 + $md_spl++, 0, "Uniprot/CDD_Features"); 
     }
     return %h;
 }
